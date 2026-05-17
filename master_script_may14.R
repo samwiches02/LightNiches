@@ -499,28 +499,6 @@ env_long_test %>%
   head(10)
 
 
-# 1. How many rows did the pipeline actually produce?
-nrow(output)
-
-# 2. What hoboIDs are in output vs env_long_test?
-sort(unique(output$hoboID_env))
-sort(unique(as.character(env_long_test$hoboID)))
-
-# 3. Did the join match anything before the filter?
-output %>%
-  left_join(
-    env_long_test %>%
-      mutate(hoboID_env = as.character(hoboID)) %>%
-      select(datetime_pos, hoboID_env, light_mol),
-    by = c("datetime_pos", "hoboID_env")
-  ) %>%
-  summarise(
-    total = n(),
-    has_pred = sum(!is.na(pred_par)),
-    has_light = sum(!is.na(light_mol)),
-    has_both = sum(!is.na(pred_par) & !is.na(light_mol))
-  )
-
 
 
 
