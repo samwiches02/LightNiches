@@ -1,0 +1,9 @@
+# ignore everything 
+*
+
+#Except these files
+!master_script_may14.R
+!env_long_depth_kd_longlat.csv
+!geom_new.csv
+!.gitignore
+!README.md
