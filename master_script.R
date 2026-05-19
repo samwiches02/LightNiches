@@ -25,13 +25,13 @@
 #(sample matrix at points)    │
 #│                            │
 #└──────────┬──────────────-──┘
-#▼
-#pred_par
+#           ▼
+#       pred_par
 #surface_par × shadow × water_atten
-#│
-#▼
-#Validation
-#pred_par ↔ light_mol
+#   │
+#   ▼
+# Validation
+# pred_par ↔ light_mol
 
 
 
@@ -61,7 +61,7 @@ setwd("~/Desktop/MEM MSc/1thesis/LightNiches-main/output")
 #env_long datasheet, and converts timestamps into a date-time object in the correct timezone for lizard island
 #this sheet has kd back-calculated from the sensors, the code doesnt use it, I need to remove this
 env_long <- read.csv("env_long_depth_kd_longlat.csv") %>%
-  mutate(datetime_pos = as.POSIXct(datetime_pos, tz = "Australia/Brisbane"))
+  mutate(datetime_pos = as.POSIXct(datetime_pos, format = "%m/%d/%y %H:%M", tz = "Australia/Brisbane"))
 
 
 # geom_new.csv provides correct lon/lat (in local transmercator projection) and
@@ -81,7 +81,7 @@ DEM_DIR <- "/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems"
 #stores the universal KD number, I need to adjust this a bit better, 
 #look at jervlov water quality values etc. Right now (May 14) I am using a mean value from a site
 
-KD_CONSTANT <- 0.31
+KD_CONSTANT <- 0.35
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -102,7 +102,7 @@ trim_na_border <- function(mat, threshold = 0.5) { #takes a grid matrix and remo
 
 # ── prepare_dem ───────────────────────────────────────────────────────────────
 # Load DEM, downsample, convert to a matrix for rayshading.
-prepare_dem <- function(site, year, fact = 3) { #the downsample is by a factor of 3, and makes raytraycing faster without losing a lot of noise
+prepare_dem <- function(site, year, fact = 1) { #the downsample is by a factor of 3, and makes raytraycing faster without losing a lot of noise
   path <- file.path(DEM_DIR, paste0(site, year, ".tif"))
   message("  Loading DEM: ", path)
   dem        <- rast(path) |> trim()
@@ -432,7 +432,7 @@ run_pipeline <- function(env_long, geom) {
 # ══════════════════════════════════════════════════════════════════════════════
 
 env_long_test <- env_long %>%
-  filter(site == "L1", year == 19)
+  filter(site == "CB", year == 17)
 
 output <- run_pipeline(env_long_test, geom)
 
@@ -458,45 +458,34 @@ write.csv(validation, "L119_output.csv", row.names = FALSE)
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLOT — measured vs predicted PAR per logger
 # ══════════════════════════════════════════════════════════════════════════════
+ylim_shared <- range(c(validation$pred_par, validation$light_mol), na.rm = TRUE)
 
 hobos   <- sort(unique(validation$hoboID_env))
 n_hobos <- length(hobos)
 n_cols  <- 5
-n_rows  <- ceiling(n_hobos / n_cols) + 1   # +1 row for legend
+n_rows  <- ceiling(n_hobos / n_cols) + 1
 
 par(mfrow = c(n_rows, n_cols), mar = c(2, 2, 1.5, 0.5))
 
 for (id in hobos) {
   sub  <- validation[validation$hoboID_env == id, ]
   sub  <- sub[order(sub$datetime_pos), ]
-  ylim <- range(c(sub$pred_par, sub$light_mol), na.rm = TRUE)
-
+  
   plot(sub$datetime_pos, sub$light_mol,
        type = "l", col = "blue", lwd = 1.5,
-       ylim = ylim, xlab = "", ylab = "",
+       ylim = ylim_shared,
+       xlab = "", ylab = "",
        main = id, cex.main = 0.8, xaxt = "n")
-
+  
   axis.POSIXct(1, sub$datetime_pos, format = "%H", cex.axis = 0.6)
-
-  lines(sub$datetime_pos, sub$pred_par,
-        col = "red", lwd = 1.5, lty = 2)
+  lines(sub$datetime_pos, sub$pred_par, col = "red", lwd = 1.5, lty = 2)
 }
 
 plot.new()
-legend("center",
-       legend = c("Measured", "Predicted"),
-       col    = c("blue", "red"),
-       lty    = c(1, 2), lwd = 2,
-       cex    = 0.9, bty = "n")
+legend("center", legend = c("Measured", "Predicted"),
+       col = c("blue", "red"), lty = c(1, 2), lwd = 2, cex = 0.9, bty = "n")
 
 par(mfrow = c(1, 1))
-
-env_long_test %>%
-  mutate(hour = lubridate::floor_date(datetime_pos, "1 hour")) %>%
-  group_by(hour) %>%
-  summarise(surface_par = first(surface_par)) %>%
-  arrange(desc(surface_par)) %>%
-  head(10)
 
 
 
