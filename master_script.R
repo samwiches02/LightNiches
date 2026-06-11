@@ -81,8 +81,12 @@ DEM_DIR <- "/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems"
 #stores the universal KD number, I need to adjust this a bit better, 
 #look at jervlov water quality values etc. Right now (May 14) I am using a mean value from a site
 
-KD_CONSTANT <- 0.35
-
+KD_CONSTANT <- 0.15
+SHADOW_GAMMA <- 1
+Z_SCALE <- 0.006
+TIMESTEP_INTERVAL <- "1 hour"
+DOWNSAMPLE_FACTOR <- 3
+MAXSEARCH_FACT <- 400
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
@@ -91,7 +95,7 @@ KD_CONSTANT <- 0.35
 
 # ── trim_na_border ────────────────────────────────────────────────────────────
 # Remove rows/columns whose NA fraction exceeds threshold.
-trim_na_border <- function(mat, threshold = 0.5) { #takes a grid matrix and removes rows or columns where more than half the values are missing 
+trim_na_border <- function(mat, threshold = 0.75) { #takes a grid matrix and removes rows or columns where more than half the values are missing 
   #I can change the threshold later 
   keep_rows <- apply(mat, 1, function(r) mean(is.na(r)) <= threshold)
   mat <- mat[keep_rows, , drop = FALSE]
@@ -102,20 +106,28 @@ trim_na_border <- function(mat, threshold = 0.5) { #takes a grid matrix and remo
 
 # ── prepare_dem ───────────────────────────────────────────────────────────────
 # Load DEM, downsample, convert to a matrix for rayshading.
-prepare_dem <- function(site, year, fact = 1) { #the downsample is by a factor of 3, and makes raytraycing faster without losing a lot of noise
+prepare_dem <- function(site, year, fact = DOWNSAMPLE_FACTOR) {
   path <- file.path(DEM_DIR, paste0(site, year, ".tif"))
   message("  Loading DEM: ", path)
   dem        <- rast(path) |> trim()
+  message("  Raw DEM CRS: ", crs(dem, describe=TRUE)$name)
+  message("  Raw DEM extent: ", paste(as.vector(ext(dem)), collapse = " "))
   dem_small  <- aggregate(dem, fact = fact)
-  # zscale = 1: horizontal and vertical units are both metres, so there is no crazy exaggeerations
-  zscale     <- 1
+  zscale     <- Z_SCALE
   dem_matrix <- raster_to_matrix(raster(dem_small))
-  dem_matrix <- trim_na_border(dem_matrix, threshold = 0.5)
+  
+  # trim the matrix AND crop the raster to match
+  keep_rows <- apply(dem_matrix, 1, function(r) mean(is.na(r)) <= 0.5)
+  keep_cols <- apply(dem_matrix, 2, function(c) mean(is.na(c)) <= 0.5)
+  dem_matrix <- dem_matrix[keep_rows, keep_cols, drop = FALSE]
+  dem_small  <- dem_small[keep_rows, keep_cols, drop = FALSE]
+  
   message("  DEM loaded: ", nrow(dem_matrix), " x ", ncol(dem_matrix),
           " | raster: ", nrow(dem_small), " x ", ncol(dem_small))
   list(matrix = dem_matrix, rast = dem_small, zscale = zscale)
 }
 #this returns 3 things, a matrix for rayshader, a raster for coordinate extraction, and the zscale
+
 
 # ── load_hobo_locations ───────────────────────────────────────────────────────
 # build a sf point object from geom_new coordinates for a given site/year.
@@ -153,6 +165,29 @@ get_sun <- function(time, lat, lon) {
 #this runs the raytracing in the background, sending the dem_matrix that I made with prepare_dem
 #and sun positioning to do raytracing using rayshader, this returns a grid of values 
 #0 is fully shaded, and 1 is fully lit, if the sun is below the horizon it skips the measurements to save time
+
+#slow command
+make_shadow <- function(dem_matrix, sun, zscale, gamma = SHADOW_GAMMA) { # gamma raises every shadow fraction (0–1) to a power of (gamma = x), which creates a curve where partly-shaded/shaded areas are pushed darker while fully-lit areas near or stay at 1
+  if (sun$altitude <= 0.1) {
+    message("    (sun below horizon — skipping raytrace)")
+    return(NULL)
+  }
+  shadow  <- ray_shade(
+    dem_matrix,
+    sunaltitude = sun$altitude * 180 / pi, #gets sun altitude in degrees from radians
+    sunangle    = sun$azimuth  * 180 / pi, #gets sun azimuth in degrees from radians
+    zscale      = Z_SCALE, #the zscale remains the same (1:1 horizontal vs vertical)
+    maxsearch   = MAXSEARCH_FACT #limits how each ray travels, so smaller features have more importance (but this takes longer)
+  )
+  ambient <- ambient_shade(dem_matrix, zscale = zscale) #calculates a new shadow layer based on ambient shade, making more enclosed spots darker regardless of sun angle
+  shadow  <- (shadow * ambient) ^ gamma #darkens areas by applying a power of gamma to the shadow*ambient layer,this will crush the shadow layer (hopefully) to make darker stronger and lighter lighter 
+  message("    shadow range: ", round(min(shadow, na.rm = TRUE), 3),
+          " to ", round(max(shadow, na.rm = TRUE), 3),
+          " | mean: ", round(mean(shadow, na.rm = TRUE), 3))
+  shadow
+}
+
+#original command 
 make_shadow <- function(dem_matrix, sun, zscale) {
   if (sun$altitude <= 0.1) {
     message("    (sun below horizon — skipping raytrace)")
@@ -162,7 +197,8 @@ make_shadow <- function(dem_matrix, sun, zscale) {
     dem_matrix,
     sunaltitude = sun$altitude * 180 / pi,
     sunangle    = sun$azimuth  * 180 / pi,
-    zscale      = zscale
+    zscale      = zscale,
+    maxsearch = MAXSEARCH_FACT
   )
   message("    shadow range: ", round(min(shadow, na.rm = TRUE), 3),
           " to ", round(max(shadow, na.rm = TRUE), 3),
@@ -185,21 +221,29 @@ calc_water_attenuation <- function(Kd, water_depth_m) {
 # ── extract_hobo_dem ──────────────────────────────────────────────────────────
 #this looks up hobo logger locations and stores it as a new column called dem elevation, which is not used in the final prediction but good to have 
 extract_hobo_dem <- function(dem_rast, hobo_sf) {
-  hobo_proj        <- st_transform(hobo_sf, crs(dem_rast))
-  vals             <- terra::extract(dem_rast, vect(hobo_proj))
+  hobo_wgs84       <- st_transform(hobo_sf, "EPSG:4326")
+  vals             <- terra::extract(dem_rast, vect(hobo_wgs84))
   hobo_sf$dem_elev <- vals[, 2]
   hobo_sf
 }
-
 # ── extract_hobo_shadow ───────────────────────────────────────────────────────
 #this takes the shadow grid from make_shadow, and puts it in to a spatial raster with the same coordinates as the raster, than samples each loggers exact location
 #to get the logger's shadow fraction for that hour
 extract_hobo_shadow <- function(shadow_matrix, dem_rast, hobo_sf) {
   shadow_rast      <- rast(shadow_matrix)
   ext(shadow_rast) <- ext(dem_rast)
-  crs(shadow_rast) <- crs(dem_rast)
-  hobo_proj        <- st_transform(hobo_sf, crs(dem_rast))
-  vals             <- terra::extract(shadow_rast, vect(hobo_proj))
+  crs(shadow_rast) <- crs(dem_rast)   # WGS84
+  
+  # reproject hobo points TO WGS84 to match the shadow raster
+  hobo_wgs84 <- st_transform(hobo_sf, "EPSG:4326")
+  
+  # buffer 10cm = 0.10m, convert to degrees at this latitude
+  # at -14.7 degrees: 1 degree ≈ 111,000m, so 0.4m ≈ 0.0000036 degrees
+  buffer_deg <- 0.10 / 111000
+  hobo_buffered <- st_buffer(hobo_wgs84, dist = buffer_deg)
+  
+  # extract mean shadow value within each buffer
+  vals <- terra::extract(shadow_rast, vect(hobo_buffered), fun = mean, na.rm = TRUE)
   vals[, 2]
 }
 
@@ -239,6 +283,15 @@ process_timestep <- function(env_block, dem_matrix, dem_rast, dem_zscale,
     rep(NA_real_, nrow(hobo_sf))
   }
 
+  message("    shadow per logger: ",
+          paste(hobo_sf$hoboID, "=", round(shadow_vals, 3), collapse = ", "))
+  message("    dem_rast extent: ", paste(round(as.vector(ext(dem_rast)), 1), collapse = " "))
+  hobo_proj <- st_transform(hobo_sf, crs(dem_rast))
+  message("    hobo bbox: ", paste(round(st_bbox(hobo_proj), 1), collapse = " "))
+  message("    hobo coords raw: ", paste(round(st_coordinates(hobo_sf), 1), collapse = " "))
+  message("    dem_rast CRS: ", crs(dem_rast, describe=TRUE)$name)
+  message("    hobo_sf CRS: ", st_crs(hobo_sf)$input)
+  
   # 4. this makes a table pairing each shadow value with the logger id
   shadow_df <- data.frame(
     hoboID_env      = hobo_sf$hoboID,
@@ -259,7 +312,7 @@ process_timestep <- function(env_block, dem_matrix, dem_rast, dem_zscale,
       sun_altitude = sun$altitude,
       sun_azimuth  = sun$azimuth,
       water_atten  = calc_water_attenuation(Kd, water_depth_m),
-      pred_par     = surface_par * shadow_fraction * water_atten
+      pred_par     = surface_par * (shadow_fraction ^ SHADOW_GAMMA) * water_atten
     )
 
   as_tibble(result)
@@ -334,7 +387,7 @@ run_pipeline <- function(env_long, geom) {
         
         #snap every 5 min timestamp to its hour 
         #11:05, 11:10, 11:55 all become 11, which makes rows share the same datetime
-        mutate(datetime_pos = floor_date(datetime_pos, "1 hour")) %>%
+        mutate(datetime_pos = floor_date(datetime_pos, TIMESTEP_INTERVAL)) %>%
         
         #group rows by hgour and logger id, so each hour/logger gets its own independent group
         group_by(datetime_pos, hoboID) %>%
@@ -430,9 +483,19 @@ run_pipeline <- function(env_long, geom) {
 # ══════════════════════════════════════════════════════════════════════════════
 #  RUN a test/chunk of it— edit site/year filter here
 # ══════════════════════════════════════════════════════════════════════════════
+#env_long_hour <- env_long %>%
+#  filter(site == "CB", year == 18) %>%
+#  filter(datetime_pos >= as.POSIXct("2018-12-04 11:00:00", tz = "Australia/Brisbane"),
+#         datetime_pos <= as.POSIXct("2018-12-04 13:00:00", tz = "Australia/Brisbane"))
+
 
 env_long_test <- env_long %>%
-  filter(site == "CB", year == 17)
+  filter(site == "CB", year == 18)
+
+env_long_test <- env_long %>%
+  filter(site == "CB", year == 18) %>%
+  filter(datetime_pos >= as.POSIXct("2018-12-04 11:00:00", tz = "Australia/Brisbane"),
+         datetime_pos <  as.POSIXct("2018-12-04 18:00:00", tz = "Australia/Brisbane"))
 
 output <- run_pipeline(env_long_test, geom)
 
@@ -452,43 +515,297 @@ validation <- output %>%
 
 nrow(validation)
 
-write.csv(validation, "L119_output.csv", row.names = FALSE)
+#write.csv(validation, "L119_output.csv", row.names = FALSE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLOT — measured vs predicted PAR per logger
 # ══════════════════════════════════════════════════════════════════════════════
+# ── PLOT ──────────────────────────────────────────────────────────────────────
+dev.off()
+dev.new()
+
+site_name  <- unique(validation$site)
+date_range <- format(range(validation$datetime_pos), "%Y-%m-%d")
+plot_title <- paste0(
+  site_name, " | ", date_range[1], " to ", date_range[2], "\n",
+  "Kd=", KD_CONSTANT,
+  " | gamma=", SHADOW_GAMMA,
+  " | zscale=", Z_SCALE,
+  " | interval=", TIMESTEP_INTERVAL
+)
+
 ylim_shared <- range(c(validation$pred_par, validation$light_mol), na.rm = TRUE)
+hobos       <- sort(unique(validation$hoboID_env))
+n_hobos     <- length(hobos)
+n_cols      <- 5
+n_rows      <- ceiling(n_hobos / n_cols)
+legend_cell <- n_hobos + 2
 
-hobos   <- sort(unique(validation$hoboID_env))
-n_hobos <- length(hobos)
-n_cols  <- 5
-n_rows  <- ceiling(n_hobos / n_cols) + 1
+# pad with 0 (= empty cell) instead of NA
+plot_cells <- c(2:(n_hobos + 1), rep(0, n_cols * n_rows - n_hobos))
 
-par(mfrow = c(n_rows, n_cols), mar = c(2, 2, 1.5, 0.5))
+layout_mat <- rbind(
+  rep(1, n_cols),
+  matrix(plot_cells, nrow = n_rows, ncol = n_cols, byrow = TRUE),
+  rep(legend_cell, n_cols)
+)
 
-for (id in hobos) {
-  sub  <- validation[validation$hoboID_env == id, ]
-  sub  <- sub[order(sub$datetime_pos), ]
+layout(layout_mat, heights = c(0.8, rep(3, n_rows), 0.8))
+
+# 1. title
+par(mar = c(0, 0, 0, 0))
+plot.new()
+text(0.5, 0.5, plot_title, cex = 1.2, font = 2, adj = 0.5)
+
+# 2. per-logger panels
+for (i in seq_along(hobos)) {
+  par(mar = c(2, 2, 1.5, 0.5))
+  id  <- hobos[i]
+  sub <- validation[validation$hoboID_env == id, ]
+  sub <- sub[order(sub$datetime_pos), ]
+  
+  is_left <- (i - 1) %% n_cols == 0
   
   plot(sub$datetime_pos, sub$light_mol,
-       type = "l", col = "blue", lwd = 1.5,
-       ylim = ylim_shared,
-       xlab = "", ylab = "",
-       main = id, cex.main = 0.8, xaxt = "n")
+       type  = "l", col = "blue", lwd = 1.5,
+       ylim  = ylim_shared,
+       xlab  = "", ylab = "",
+       main  = id, cex.main = 0.85,
+       xaxt  = "n",
+       yaxt  = if (is_left) "s" else "n")
   
   axis.POSIXct(1, sub$datetime_pos, format = "%H", cex.axis = 0.6)
   lines(sub$datetime_pos, sub$pred_par, col = "red", lwd = 1.5, lty = 2)
 }
 
+# 3. legend
+par(mar = c(0, 0, 0, 0))
 plot.new()
-legend("center", legend = c("Measured", "Predicted"),
-       col = c("blue", "red"), lty = c(1, 2), lwd = 2, cex = 0.9, bty = "n")
+legend("center",
+       legend = c("Measured", "Predicted"),
+       col    = c("blue", "red"),
+       lty    = c(1, 2), lwd = 2,
+       cex    = 1.0, bty = "n",
+       horiz  = TRUE)
 
-par(mfrow = c(1, 1))
+layout(1)
+
+#Shadow map Hourly (simple) with HOBOS on it to see if they are in correct places, zscale exaggerated
+dem <- prepare_dem("CB", 18)
+hobo_sf <- load_hobo_locations("CB", 18, geom)
+hobo_wgs84 <- st_transform(hobo_sf, "EPSG:4326")
+
+shadow_test <- ray_shade(dem$matrix,
+                         sunaltitude = 72,
+                         sunangle    = -62.8,
+                         zscale      = 0.005,
+                         maxsearch   = 200)
+
+shadow_rast <- rast(shadow_test)
+ext(shadow_rast) <- ext(dem$rast)
+crs(shadow_rast) <- crs(dem$rast)
+
+#png("shadow_overlay.png", width = 1200, height = 1200)
+plot(shadow_rast, main = "Shadow map with logger locations")
+plot(vect(hobo_wgs84), add = TRUE, col = "red", cex = 2, pch = 16)
+text(st_coordinates(hobo_wgs84)[,1], 
+     st_coordinates(hobo_wgs84)[,2], 
+     labels = hobo_sf$hoboID, 
+     col = "white", cex = 0.7, font = 2,
+     pos = 3)  # pos=3 puts label above the point
+dev.off()
+
+
+
+#plot of DLI with sensors
+# calculate DLI from measured data (5 min intervals)
+dli_measured <- aggregate(
+  light_mol ~ hoboID + as.Date(datetime_pos),
+  data = env_long[env_long$site == "CB" & env_long$year == 18, ],
+  FUN = function(x) sum(x, na.rm=TRUE) * (5/60) / 1e6
+)
+colnames(dli_measured) <- c("hoboID", "date", "dli_measured")
+
+# calculate DLI from predicted (hourly)
+validation$date <- as.Date(validation$datetime_pos)
+dli_predicted <- aggregate(
+  pred_par ~ hoboID_env + date,
+  data = validation,
+  FUN = function(x) sum(x, na.rm=TRUE) / 1e6
+)
+colnames(dli_predicted) <- c("hoboID", "date", "dli_predicted")
+
+# join
+dli <- merge(dli_measured, dli_predicted, by = c("hoboID", "date"))
+
+# plot
+plot(dli$dli_measured, dli$dli_predicted,
+     pch = 16, col = "steelblue",
+     xlab = "measured DLI (mol m-2 d-1)",
+     ylab = "predicted dli (mol m-2 d-1)",
+     main = "daly light integral, measured vs predicted, CB18")
+
+abline(0, 1, lty = 2, col = "red", lwd = 2)
+
+text(dli$dli_measured, dli$dli_predicted,
+     labels = dli$hoboID,
+     cex = 0.7, pos = 3)
+
+
+###### Plot of just points at different times of day 
+
+# filter to specific hours
+time_df <- validation %>%
+  mutate(hour = as.integer(format(datetime_pos, "%H"))) %>%
+  filter(hour %in% c(12, 15, 17)) %>%
+  mutate(time_label = case_when(
+    hour == 12 ~ "12:00",
+    hour == 15 ~ "15:00",
+    hour == 17 ~ "17:00"
+  ))
+
+# get shared axis limits
+lim <- range(c(time_df$light_mol, time_df$pred_par), na.rm = TRUE)
+
+# plot
+plot(NULL, xlim = lim, ylim = lim,
+     xlab = "Observed PAR (µmol)",
+     ylab = "Predicted PAR (µmol)",
+     main = "Predicted vs Observed PAR by time of day, CB18, KD=0.2, zscale exaggerated")
+
+abline(0, 1, lty = 2, col = "grey40", lwd = 1.5)
+
+# add points per time with different symbols
+points(time_df$light_mol[time_df$hour == 12],
+       time_df$pred_par[time_df$hour == 12],
+       pch = 16, col = "orange", cex = 1.5)
+
+points(time_df$light_mol[time_df$hour == 15],
+       time_df$pred_par[time_df$hour == 15],
+       pch = 15, col = "steelblue", cex = 1.5)
+
+points(time_df$light_mol[time_df$hour == 17],
+       time_df$pred_par[time_df$hour == 17],
+       pch = 8, col = "darkred", cex = 1.5)
+
+legend("topleft",
+       legend = c("12:00", "15:00", "17:00"),
+       pch = c(16, 15, 8),
+       col = c("orange", "steelblue", "darkred"),
+       bty = "n")
+
+
+# load and plot the DEM with a terrain colour palette
+dem_view <- rast("/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems/CB18.tif")
+
+plot(dem_view, 
+     col = terrain.colors(100),
+     main = "CB18 DEM")
+
+
+
+######DEM ZSCALE CALCULATION
+
+# calculate correct zscale from DEM properties
+dem_check <- rast("/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems/CB18.tif")
+
+# horizontal extent in metres
+e <- ext(dem_check)
+width_deg  <- e$xmax - e$xmin
+height_deg <- e$ymax - e$ymin
+
+# at -14.7 latitude: 1 degree longitude ≈ 107,000m, 1 degree latitude ≈ 111,000m
+width_m  <- width_deg  * 107000
+height_m <- height_deg * 111000
+
+# pixel size in metres
+pixel_size_m <- (width_m / ncol(dem_check) + height_m / nrow(dem_check)) / 2
+
+# vertical range
+relief <- global(dem_check, "max", na.rm=TRUE)$max - 
+  global(dem_check, "min", na.rm=TRUE)$min
+
+cat("Pixel size (m):", pixel_size_m, "\n")
+cat("Total relief (m):", relief, "\n")
+cat("Correct zscale:", pixel_size_m, "\n")
 
 
 
 
+###plot per logger
+dem <- prepare_dem("CB", 18)
+hobo_sf <- load_hobo_locations("CB", 18, geom)
+hobo_wgs84 <- st_transform(hobo_sf, "EPSG:4326")
+
+png("logger_check.png", width=2400, height=2400)
+par(mfrow=c(6,5), mar=c(1,1,2,1))
+
+s <- ray_shade(dem$matrix, sunaltitude=45, sunangle=-70,
+               zscale=0.004, maxsearch=200)
+sr <- rast(s)
+ext(sr) <- ext(dem$rast)
+crs(sr) <- crs(dem$rast)
+
+for(i in 1:nrow(hobo_wgs84)){
+  plot(sr, legend=FALSE, axes=FALSE,
+       main=hobo_sf$hoboID[i])
+  plot(vect(hobo_wgs84[i,]), add=TRUE, 
+       col="red", cex=3, pch=16)
+}
+dev.off()
+
+
+# all 11 timesteps from your pipeline output
+timesteps <- list(
+  list(time="2018-12-04 11:00", alt=72.1,  az=-62.8),
+  list(time="2018-12-04 12:00", alt=82.2,  az=-15.1),
+  list(time="2018-12-04 13:00", alt=75.7,  az=56.4),
+  list(time="2018-12-04 14:00", alt=62.6,  az=69.9),
+  list(time="2018-12-04 15:00", alt=48.8,  az=72.9),
+  list(time="2018-12-04 16:00", alt=35.0,  az=72.9),
+  list(time="2018-12-04 17:00", alt=21.1,  az=71.5),
+  list(time="2018-12-05 07:00", alt=17.1,  az=-70.8),
+  list(time="2018-12-05 08:00", alt=30.8,  az=-72.5),
+  list(time="2018-12-05 09:00", alt=44.7,  az=-73.0),
+  list(time="2018-12-05 10:00", alt=58.5,  az=-71.1)
+)
+
+png("shadow_multipanel_labelled.png", width=3200, height=2400, res=150)
+par(mfrow=c(3, 4), mar=c(1, 1, 3, 1))
+
+for(ts in timesteps) {
+  shadow <- ray_shade(dem$matrix,
+                      sunaltitude = ts$alt,
+                      sunangle    = ts$az,
+                      zscale      = 0.005,
+                      maxsearch   = 200)
+  
+  shadow_rast <- rast(shadow)
+  ext(shadow_rast) <- ext(dem$rast)
+  crs(shadow_rast) <- crs(dem$rast)
+  
+  plot(shadow_rast,
+       main = paste0(ts$time, "\nalt=", ts$alt, "° az=", ts$az, "°"),
+       legend = FALSE,
+       axes = FALSE)
+  
+  plot(vect(hobo_wgs84), add=TRUE, col="red", cex=1.2, pch=16)
+  
+  text(st_coordinates(hobo_wgs84)[,1],
+       st_coordinates(hobo_wgs84)[,2],
+       labels = hobo_sf$hoboID,
+       col = "white", cex = 0.55, font = 2, pos = 3)
+}
+
+# empty last panel for legend
+plot.new()
+legend("center",
+       legend = c("Logger location"),
+       col = "red", pch = 16, pt.cex = 1.5,
+       bty = "n", cex = 1.2)
+
+dev.off()
+message("Saved shadow_multipanel_labelled.png")
 
 
