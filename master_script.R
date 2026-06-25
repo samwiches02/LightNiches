@@ -310,9 +310,29 @@ DEM_DIR <- "/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems"
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-KD_CONSTANT  <- 0.2   # fallback per-site, AND value used when USE_CONSTANT_KD=TRUE
+KD_CONSTANT  <- 0.32   # fallback per-site, AND value used when USE_CONSTANT_KD=TRUE
 USE_CONSTANT_KD <- FALSE   # TRUE = ignore the lookup; apply KD_CONSTANT to every site
 
+# Per-site implied Kd from residuals
+# Beer-Lambert: pred = surface * eff * exp(-Kd_used * z)
+#               meas = surface * eff * exp(-Kd_true * z)
+# => Kd_true = Kd_used + ln(pred/meas) / z
+
+kd_implied <- validation %>%
+  filter(is.finite(pred_par), is.finite(light_mol),
+         pred_par > 50, light_mol > 50,         # daylight only
+         water_depth_m > 1) %>%                 # avoid divide-by-tiny
+  mutate(kd_inferred = Kd + log(pred_par / light_mol) / water_depth_m) %>%
+  group_by(sitekey) %>%
+  summarise(kd_used    = first(Kd),
+            kd_median  = median(kd_inferred, na.rm = TRUE),
+            kd_mean    = mean(kd_inferred,   na.rm = TRUE),
+            kd_p25     = quantile(kd_inferred, 0.25, na.rm = TRUE),
+            kd_p75     = quantile(kd_inferred, 0.75, na.rm = TRUE),
+            n          = n(),
+            .groups = "drop")
+
+print(kd_implied)
 
 # which KdPAR variant to apply:
 #   "kdpar_photon" = photon-weighted full-band integral
@@ -342,13 +362,46 @@ local({
 })
 
 
+# ── PER-SITE Kd OVERRIDE HOOK ─────────────────────────────────────────────────
+#  Manually replace the satellite KdPAR for specific site/years. Useful when the
+#  depth-gradient regression on a site disagrees with the satellite value (e.g.
+#  CB19 wants ~0.55 but satellite gives 0.24). Keys are "SITEyy", same format
+#  as KDPAR_BY_KEY. Any key NOT listed keeps its satellite value.
+#
+#  Skipped entirely when USE_CONSTANT_KD = TRUE (constant Kd deliberately
+#  ignores everything) and when USE_REFERENCE_KD = TRUE (reference-derived
+#  Kd(t) supersedes the per-site scalar). Only takes effect on satellite-Kd
+#  runs and on the spectral path's fallback.
+KDPAR_OVERRIDE <- c(
+  "CB19" = 0.28, #mean
+  "GT19" = 0.30, #mean
+  "HS19" = 0.27, #median
+  "N319" = 0.32, #median
+  "TB19" = 0.58, #median
+  "TM19" = 0.42 #median
+)
+
+if (length(KDPAR_OVERRIDE) > 0 && !USE_CONSTANT_KD && !USE_REFERENCE_KD) {
+  for (k in names(KDPAR_OVERRIDE)) {
+    if (k %in% names(KDPAR_BY_KEY)) {
+      message(sprintf("  Kd OVERRIDE %s: %.3f -> %.3f",
+                      k, KDPAR_BY_KEY[[k]], KDPAR_OVERRIDE[[k]]))
+      KDPAR_BY_KEY[[k]] <- KDPAR_OVERRIDE[[k]]
+    } else {
+      warning("KDPAR_OVERRIDE has key '", k, "' not in KDPAR_BY_KEY — ignored.")
+    }
+  }
+} else if (length(KDPAR_OVERRIDE) > 0) {
+  message("KDPAR_OVERRIDE set but USE_CONSTANT_KD or USE_REFERENCE_KD is on — ignored.")
+}
+
 # ── SPECTRAL (depth-dependent) Kd toggle ──────────────────────────────────────
 # FALSE = single photon-weighted KdPAR (your validated main result).
 # TRUE  = attenuate each of the 10 bands at its own Kd and sum surviving PAR;
 #         depth-dependence then emerges automatically (Canto method). Run BOTH
 #         and compare the DLI plot / RMSE — this is a sensitivity analysis, not
 #         a replacement, until the comparison says otherwise.
-USE_SPECTRAL_KD <- TRUE
+USE_SPECTRAL_KD <- FALSE
 
 WAVES_PAR <- c(412, 443, 469, 488, 531, 547, 555, 645, 667, 678)  # must match kdpar_full.R
 
@@ -371,6 +424,7 @@ if (USE_SPECTRAL_KD) {
 } else {
   message("Spectral Kd OFF — using single ", KDPAR_COL, ".")
 }
+
 
 
 # ── REFERENCE-LOGGER TIME-VARYING Kd (sensitivity / alternate attenuation) ────
@@ -396,7 +450,7 @@ if (USE_CONSTANT_KD) {
 # is computed independently, then aggregated across candidates by REF_AGG_FUN.
 # Median is more robust than mean if one ref has unmodelled shadow at some hour
 # (a single inflated Kd value gets ignored; mean would drag the aggregate up).
-N_REF_LOGGERS <- 3
+N_REF_LOGGERS <- 5
 REF_AGG_FUN   <- function(x) stats::median(x, na.rm = TRUE)
 
 # Paste the find_reference_loggers(validation) output here.
@@ -412,11 +466,11 @@ REF_AGG_FUN   <- function(x) stats::median(x, na.rm = TRUE)
 #   4. Set USE_REFERENCE_KD <- TRUE and re-run.
 #   5. Don't re-run the finder unless something structural changes.
 REFERENCE_LOGGER <- list(
-  "CB19" = c("H48", "H02", "H03"),
-  "GT19" = c("H27", "H44", "H14"),
-  "HS19" = c("H57", "H36", "H52"),
-  "N319" = c("H34", "H51", "H23"),
-  "TB19" = c("H28", "H70", "H46"),
+  "CB19" = c("H11", "H57"),
+  "GT19" = c("H27", "H37"),
+  "HS19" = c("H57", "H52"),
+  "N319" = c("H44", "H01"),
+  "TB19" = c("H47", "H18", "H52", "H05", "H46"),
   "TM19" = c("H67", "H28", "H47")
 )
 
@@ -463,7 +517,7 @@ MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already fine
 #if the resolution is as high as 2mm no matter which projection, then zscale will be a small fraction of 1
 
 #Buffer to extract shadow and ambient values (always matching) in meters
-BUFFER_M <- 0.03
+BUFFER_M <- 0.7
 
 # ── REEF DISC & RAY-SEARCH — ALL IN METRES (replaces pixel-based equivalents) ─
 #
@@ -515,7 +569,8 @@ MAXSEARCH_M         <- 13  # direct-beam ray distance (m). At TB18's zscale
 # matching the old MAXSEARCH_FACT=700 — so TB18
 # reproduces previous shadows; other sites become
 # consistent with it.
-AMBIENT_MAXSEARCH_M <- 13   # ambient ray distance (m). ~500 px on TB18.
+
+
 
 # ── AMBIENT OCCLUSION constants ───────────────────────────────────────────────
 # ambient_shade() models DIFFUSE skylight: for each pixel it fires a fan of rays
@@ -528,8 +583,30 @@ AMBIENT_MAXSEARCH_M <- 13   # ambient ray distance (m). ~500 px on TB18.
 # per DEM and reused for every hour.
 USE_AMBIENT <- TRUE # FALSE = pure direct-beam (eff_light = shadow only), sensitivity test
 
+AMBIENT_MAXSEARCH_M <- 13   # ambient ray distance (m). ~500 px on TB18.
 AMBIENT_SUNBREAKS  <- 30    # rays sent in a circle around each pixel (rayshader default is 24)
+
 # maxsearch is set per-DEM inside make_ambient from AMBIENT_MAXSEARCH_M above.
+# static-mode weights (used when USE_ALT_DEPENDENT_WEIGHTS = FALSE)
+W_DIRECT  <- 0.3
+W_AMBIENT <- 0.7   # NB: W_DIRECT + W_AMBIENT must equal 1
+
+
+# per-site best static W_AMBIENT (much faster than 3-D, isolates per-site bias) (doesnt work before validation is created)
+if (exists("validation")){
+validation %>%
+  group_by(sitekey) %>%
+  group_modify(~ {
+    g <- seq(0, 0.95, by = 0.05)
+    rmse <- sapply(g, function(w) {
+      eff <- (1-w)*.x$shadow_fraction + w*.x$ambient_fraction
+      pred <- .x$surface_par * eff * exp(-.x$Kd * .x$water_depth_m)
+      sqrt(mean((pred - .x$light_mol)^2, na.rm = TRUE))
+    })
+    data.frame(best_w = g[which.min(rmse)], rmse = min(rmse))
+  }) %>% print()
+}
+
 
 
 # ── DIRECT/AMBIENT BLEND ──────────────────────────────────────────────────────
@@ -561,14 +638,15 @@ AMBIENT_SUNBREAKS  <- 30    # rays sent in a circle around each pixel (rayshader
 #  physically defensible default. Flip USE_ALT_DEPENDENT_WEIGHTS to compare.
 USE_ALT_DEPENDENT_WEIGHTS <- TRUE   # FALSE = use static W_DIRECT/W_AMBIENT
 
-# static-mode weights (used when USE_ALT_DEPENDENT_WEIGHTS = FALSE)
-W_DIRECT  <- 0.8
-W_AMBIENT <- 0.2   # NB: W_DIRECT + W_AMBIENT must equal 1
+USE_DEPTH_DEPENDENT_WEIGHTS <- TRUE   # NEW toggle, sits alongside USE_ALT_DEPENDENT_WEIGHTS
+
+
 
 # altitude-dependent-mode endpoints (used when USE_ALT_DEPENDENT_WEIGHTS = TRUE)
-W_AMBIENT_MIN <- 0.05 # diffuse weight at zenith sun (high sun)
-W_AMBIENT_MAX <- 0.9   # diffuse weight at very low sun
-W_AMBIENT_P   <- 1     # shape of the ramp:
+W_AMBIENT_MIN <- 0.10  # diffuse floor: shallow + high sun
+W_AMBIENT_MAX <- 0.80  # diffuse cap:  deep or low sun
+
+W_AMBIENT_P   <- 2     # altitude curve shape
 #   1 = linear in (1-sin α) — ramps up early
 #   2 = stays near MIN until ~30°, then ramps up
 # P=2 preserves spatial discrimination through midday
@@ -577,22 +655,54 @@ W_AMBIENT_P   <- 1     # shape of the ramp:
 # lets diffuse take over at low sun when the direct
 # beam is genuinely a minor share of incoming PAR.
 
+TAU_SCALE     <- 0.8  # optical-depth e-folding (τ at which depth-term = 0.63)
+ALT_EXP   <- 0.8    # damp altitude — only matters at very low sun
+DEPTH_EXP <- 1.2  # amplify depth — even modest depth pulls ambient up
+
+
+
 # helper: convert sun altitude (radians) -> W_AMBIENT
 # pmax/sin guards against negative altitudes (sun below horizon); pmin/pmax
 # clamps to [0,1] so the result is always a valid weight.
-w_ambient_alt <- function(sun_alt_rad) {
-  s <- sin(pmax(sun_alt_rad, 0))
-  w <- W_AMBIENT_MIN + (W_AMBIENT_MAX - W_AMBIENT_MIN) * (1 - s)^W_AMBIENT_P
+# Combined altitude + optical-depth diffuse weight.
+# Set USE_ALT_DEPENDENT_WEIGHTS=FALSE to zero out the altitude term.
+# Set USE_DEPTH_DEPENDENT_WEIGHTS=FALSE to zero out the depth term.
+# Both off => static W_AMBIENT (handled in process_timestep, not here).
+
+w_ambient_combined <- function(sun_alt_rad, water_depth_m, Kd) {
+  # If both axes are off, behave like static mode (return W_AMBIENT).
+  # Otherwise fall through to the alt × depth blend.
+  if (!USE_ALT_DEPENDENT_WEIGHTS && !USE_DEPTH_DEPENDENT_WEIGHTS) {
+    return(rep(W_AMBIENT, length(water_depth_m)))
+  }
+  
+  A <- if (USE_ALT_DEPENDENT_WEIGHTS) {
+    s <- sin(pmax(sun_alt_rad, 0))
+    (1 - s)^W_AMBIENT_P
+  } else 0
+  
+  D <- if (USE_DEPTH_DEPENDENT_WEIGHTS) {
+    tau <- pmax(Kd * water_depth_m, 0)
+    1 - exp(-tau / TAU_SCALE)
+  } else 0
+  
+  combined <- 1 - (1 - A)^ALT_EXP * (1 - D)^DEPTH_EXP
+  w <- W_AMBIENT_MIN + (W_AMBIENT_MAX - W_AMBIENT_MIN) * combined
   pmin(pmax(w, 0), 1)
 }
 
 # print the curve once at startup so you can verify the chosen P/MIN/MAX
 # produces sensible weights across the day
-if (USE_ALT_DEPENDENT_WEIGHTS) {
-  message("\n── W_AMBIENT vs sun altitude (alt-dependent mode ON) ──")
-  print(data.frame(alt_deg   = c(90, 60, 45, 30, 25, 20, 15, 10),
-                   W_AMBIENT = round(w_ambient_alt(c(90,60,45,30,25,20,15,10)*pi/180), 3),
-                   W_DIRECT  = round(1 - w_ambient_alt(c(90,60,45,30,25,20,15,10)*pi/180), 3)))
+if (USE_AMBIENT && (USE_ALT_DEPENDENT_WEIGHTS || USE_DEPTH_DEPENDENT_WEIGHTS)) {
+  message("\n── W_AMBIENT preview (alt × depth) ──")
+  alts <- c(90, 60, 30, 15) * pi/180
+  depths <- c(1, 2, 3, 4)
+  Kd_demo <- KD_CONSTANT
+  tab <- outer(alts, depths, function(a, z)
+    round(w_ambient_combined(a, z, Kd_demo), 2))
+  dimnames(tab) <- list(paste0("alt", round(alts*180/pi), "°"),
+                        paste0("z=", depths, "m"))
+  print(tab)
 } else {
   message("Static weights mode: W_DIRECT=", W_DIRECT, " W_AMBIENT=", W_AMBIENT)
 }
@@ -602,12 +712,15 @@ if (USE_ALT_DEPENDENT_WEIGHTS) {
 # plot title so figures self-document which mode produced them (you can't mix
 # up a static-w_amb=0.6 figure with an alt-dependent figure when comparing).
 weight_label <- function() {
-  if (USE_ALT_DEPENDENT_WEIGHTS) {
-    sprintf("w=alt-dep [W_amb %.2f->%.2f, p=%g]",
-            W_AMBIENT_MIN, W_AMBIENT_MAX, W_AMBIENT_P)
-  } else {
-    sprintf("w_dir=%.2f w_amb=%.2f", W_DIRECT, W_AMBIENT)
-  }
+  if (!USE_AMBIENT) return("ambient OFF (shadow only)")
+  parts <- c()
+  if (USE_ALT_DEPENDENT_WEIGHTS)   parts <- c(parts, "alt-dep")
+  if (USE_DEPTH_DEPENDENT_WEIGHTS) parts <- c(parts, sprintf("depth-dep(τ=%.1f)", TAU_SCALE))
+  if (length(parts) == 0)
+    sprintf("static [w_dir=%.2f w_amb=%.2f]", W_DIRECT, W_AMBIENT)
+  else
+    sprintf("w=%s [%.2f→%.2f, p=%g]",
+            paste(parts, collapse="+"), W_AMBIENT_MIN, W_AMBIENT_MAX, W_AMBIENT_P)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -617,8 +730,8 @@ weight_label <- function() {
 #  Honours USE_AMBIENT and the spectral-Kd path. Pooled across all site/years.
 # ══════════════════════════════════════════════════════════════════════════════
 fit_alt_weights <- function(validation,
-                            min_grid = seq(0.00, 0.30, by = 0.05),
-                            max_grid = seq(0.30, 0.85, by = 0.05),
+                            min_grid = seq(0.3, 0.70, by = 0.05),
+                            max_grid = seq(0.70, 0.90, by = 0.05),
                             p_grid   = c(1, 1.5, 2, 3, 4)) {
   
   if (!USE_AMBIENT) {
@@ -701,22 +814,63 @@ fit_alt_weights <- function(validation,
   invisible(list(best = best, grid = grid))
 }
 
+if(exists("validation")) {
 alt_fit <- fit_alt_weights(validation)
-
-# per-site best static W_AMBIENT (much faster than 3-D, isolates per-site bias)
-validation %>%
-  group_by(sitekey) %>%
-  group_modify(~ {
-    g <- seq(0, 0.95, by = 0.05)
-    rmse <- sapply(g, function(w) {
-      eff <- (1-w)*.x$shadow_fraction + w*.x$ambient_fraction
-      pred <- .x$surface_par * eff * exp(-.x$Kd * .x$water_depth_m)
-      sqrt(mean((pred - .x$light_mol)^2, na.rm = TRUE))
-    })
-    data.frame(best_w = g[which.min(rmse)], rmse = min(rmse))
-  }) %>% print()
+alt_fit <- fit_alt_weights(
+  validation,
+  min_grid = seq(0.1, 0.7, by = 0.05),   # below the static 0.7
+  max_grid = seq(0.7, 0.95, by = 0.05),   # at/above the static 0.7
+  p_grid   = c(1, 2, 3)
+)
+}
 
 
+fit_combined_weights <- function(validation,
+                                 min_grid = seq(0.20, 0.60, by = 0.05),
+                                 max_grid = seq(0.75, 0.95, by = 0.05),
+                                 p_grid   = c(1, 2, 3),
+                                 tau_grid = c(0.5, 1.0, 1.5, 2.0)) {
+  if (!USE_AMBIENT) { warning("USE_AMBIENT is FALSE"); return(NULL) }
+  
+  fitdat <- validation %>%
+    filter(!is.na(shadow_fraction), !is.na(ambient_fraction),
+           !is.na(light_mol), !is.na(surface_par),
+           !is.na(water_depth_m), !is.na(sun_altitude), !is.na(Kd))
+  
+  message("Tuning combined alt+depth on ", nrow(fitdat), " rows")
+  
+  water_atten <- exp(-fitdat$Kd * fitdat$water_depth_m)
+  sin_alt     <- sin(pmax(fitdat$sun_altitude, 0))
+  tau         <- pmax(fitdat$Kd * fitdat$water_depth_m, 0)
+  
+  grid <- expand.grid(w_min = min_grid, w_max = max_grid,
+                      p = p_grid, tau_s = tau_grid)
+  grid <- grid[grid$w_max > grid$w_min, ]
+  grid$rmse <- grid$r2_1to1 <- grid$bias <- NA_real_
+  
+  for (i in seq_len(nrow(grid))) {
+    A <- (1 - sin_alt)^grid$p[i]
+    D <- 1 - exp(-tau / grid$tau_s[i])
+    combined <- 1 - (1 - A) * (1 - D)
+    w_amb <- grid$w_min[i] + (grid$w_max[i] - grid$w_min[i]) * combined
+    w_amb <- pmin(pmax(w_amb, 0), 1)
+    eff   <- (1 - w_amb) * fitdat$shadow_fraction + w_amb * fitdat$ambient_fraction
+    pred  <- fitdat$surface_par * eff * water_atten
+    res   <- pred - fitdat$light_mol
+    grid$rmse[i]    <- sqrt(mean(res^2, na.rm = TRUE))
+    grid$bias[i]    <- mean(res, na.rm = TRUE)
+    ss_res <- sum(res^2); ss_tot <- sum((fitdat$light_mol - mean(fitdat$light_mol))^2)
+    grid$r2_1to1[i] <- 1 - ss_res/ss_tot
+  }
+  grid <- grid[order(grid$rmse), ]
+  cat("\nBest combined (alt+depth) weights:\n")
+  print(head(grid, 15), row.names = FALSE, digits = 3)
+  invisible(grid)
+}
+
+if(exists("validation")){
+fit_combined <- fit_combined_weights(validation)
+}
 
 # To apply the recommendation:
 #   USE_ALT_DEPENDENT_WEIGHTS <- TRUE
@@ -739,7 +893,10 @@ kd_method_label <- function() {
   if (USE_CONSTANT_KD)    return(sprintf("constant Kd (%.2f)", KD_CONSTANT))
   if (USE_REFERENCE_KD)   return("reference Kd")
   if (USE_SPECTRAL_KD)    return("spectral Kd")
-  paste0("satellite Kd (", KDPAR_COL, ")")
+  base <- paste0("satellite Kd (", KDPAR_COL, ")")
+  if (exists("KDPAR_OVERRIDE") && length(KDPAR_OVERRIDE) > 0)
+    base <- paste0(base, " + overrides")
+  base
 }
 KD_METHOD <- kd_method_label()   # evaluated once; re-call kd_method_label() if you flip toggles
 print(KD_METHOD)
@@ -1291,13 +1448,15 @@ process_timestep <- function(env_block, dem_matrix, dem_rast, dem_zscale,
   #    USE_AMBIENT=TRUE + USE_ALT_DEPENDENT_WEIGHTS=TRUE: physically motivated
   #         altitude-dependent W_AMBIENT (rises at low sun).
   #    USE_AMBIENT=TRUE + USE_ALT_DEPENDENT_WEIGHTS=FALSE: static W_AMBIENT.
-  w_amb_now <- if (USE_AMBIENT) {
-    if (USE_ALT_DEPENDENT_WEIGHTS) w_ambient_alt(sun$altitude) else W_AMBIENT
-  } else 0
-  w_dir_now <- 1 - w_amb_now
+  #OLD: must now vary per logger
+  #w_amb_now <- if (USE_AMBIENT) {
+  #  if (USE_ALT_DEPENDENT_WEIGHTS) w_ambient_alt(sun$altitude) else W_AMBIENT
+  #} else 0
+  # NEW: defer per-row computation into the mutate below
+  sun_alt_rad <- sun$altitude   # scalar, same for all loggers this hour
   
-  message("    weights: w_dir=", round(w_dir_now, 3),
-          " w_amb=", round(w_amb_now, 3))
+  message("    sun_alt=", round(sun_alt_rad*180/pi, 1), "°  ",
+          "(w_amb varies per logger by depth)")
   
   # 5. pair fractions with logger metadata (this hour, this site),
   #    join env data (depth, surface par, Kd), blend the directional + diffuse
@@ -1318,25 +1477,28 @@ process_timestep <- function(env_block, dem_matrix, dem_rast, dem_zscale,
     ) %>%
     mutate(
       datetime_pos = timestamp,
-      sun_altitude = sun$altitude,
+      sun_altitude = sun_alt_rad,
       sun_azimuth  = sun$azimuth,
-      w_direct     = w_dir_now,     # carry weights through for diagnostics
-      w_ambient    = w_amb_now,     # (plot w_ambient vs sun_altitude later)
-      # water attenuation: single-Kd (Beer-Lambert) OR per-band spectral sum.
-      # vapply over water_depth_m because spectral atten is depth-specific.
-      water_atten  = if (USE_SPECTRAL_KD && !is.null(kd_bands)) {
+      
+      # per-logger weights — depend on this row's depth + Kd
+      w_ambient = if (USE_AMBIENT) {
+        w_ambient_combined(sun_alt_rad, water_depth_m, Kd)
+      } else 0,
+      w_direct = 1 - w_ambient,
+      
+      water_atten = if (USE_SPECTRAL_KD && !is.null(kd_bands)) {
         vapply(water_depth_m,
                function(z) calc_water_attenuation_spectral(kd_bands, WAVES_PAR, z),
                numeric(1))
       } else {
         calc_water_attenuation(Kd, water_depth_m)
       },
-      eff_light    = if (USE_AMBIENT) {
-        w_dir_now * shadow_fraction + w_amb_now * ambient_fraction
+      eff_light = if (USE_AMBIENT) {
+        w_direct * shadow_fraction + w_ambient * ambient_fraction
       } else {
-        shadow_fraction            # ambient off: direct beam only
+        shadow_fraction
       },
-      pred_par     = surface_par * eff_light * water_atten
+      pred_par = surface_par * eff_light * water_atten
     )
   
   as_tibble(result)
@@ -1714,6 +1876,13 @@ if (length(missing_kd) > 0)
 cat("\n  ── Direct/ambient weighting ──\n")
 cat(sprintf("  USE_AMBIENT              : %s\n", USE_AMBIENT))
 cat(sprintf("  USE_ALT_DEPENDENT_WEIGHTS: %s\n", USE_ALT_DEPENDENT_WEIGHTS))
+cat(sprintf("  USE_DEPTH_DEP_WEIGHTS    : %s\n", USE_DEPTH_DEPENDENT_WEIGHTS))
+cat(sprintf("  W_AMBIENT_MIN            : %s\n", W_AMBIENT_MIN))
+cat(sprintf("  W_AMBIENT_MAX            : %s\n", W_AMBIENT_MAX))
+cat(sprintf("  W_AMBIENT_P              : %s\n", W_AMBIENT_P))
+cat(sprintf("  TAU_SCALE                : %s\n", TAU_SCALE))
+cat(sprintf("  ALT_EXP                  : %s (>1 amplifies, <1 damps)\n", ALT_EXP))
+cat(sprintf("  DEPTH_EXP                : %s (>1 amplifies, <1 damps)\n", DEPTH_EXP))
 cat(sprintf("  WEIGHTS                  : %s\n", weight_label()))
 
 cat("\n  ── DEM / raytrace geometry ──\n")
@@ -1880,12 +2049,12 @@ find_reference_loggers <- function(val,
                                    min_hours     = 5,    # min daytime hours to qualify
                                    midday_hours  = 10:14,# local hours used for agreement
                                    # geometric-openness axis weights
-                                   w_shadow_mean = 0.30, # weight: average openness to sun
+                                   w_shadow_mean = 0.4, # weight: average openness to sun
                                    w_shadow_min  = 0.15, # weight: worst-case openness
                                    w_shadow_stab = 0.10, # weight: temporal steadiness
-                                   w_ambient     = 0.05, # weight: openness to sky
+                                   w_ambient     = 0.10, # weight: openness to sky
                                    # data-agreement axis weight
-                                   w_agreement   = 0.40) {
+                                   w_agreement   = 0.25) {
   stopifnot(abs(w_shadow_mean + w_shadow_min + w_shadow_stab +
                   w_ambient + w_agreement - 1) < 1e-9)
   
@@ -2512,6 +2681,10 @@ cat("  USE_REFERENCE_KD          =", USE_REFERENCE_KD, "\n")
 cat("  USE_SPECTRAL_KD           =", USE_SPECTRAL_KD, "\n")
 cat("  USE_AMBIENT               =", USE_AMBIENT, "\n")
 cat("  USE_ALT_DEPENDENT_WEIGHTS =", USE_ALT_DEPENDENT_WEIGHTS, "\n\n")
+cat("  USE_DEPTH_DEPENDENT_WEIGHTS =", USE_DEPTH_DEPENDENT_WEIGHTS, "\n\n")
+cat("  TAU_SCALE                 =", TAU_SCALE, "\n\n")
+cat("  ALT_EXP                   =", ALT_EXP, "\n")
+cat("  DEPTH_EXP                 =", DEPTH_EXP, "\n")
 
 cat("  REEF_RADIUS_M             =", REEF_RADIUS_M, "\n")
 cat("  REEF_RADIUS_PX_TARGET     =", REEF_RADIUS_PX_TARGET, "\n")
@@ -2559,6 +2732,10 @@ log_row <- data.frame(
   use_reference_kd    = USE_REFERENCE_KD,
   use_ambient         = USE_AMBIENT,
   use_alt_dep_weights = USE_ALT_DEPENDENT_WEIGHTS,
+  use_depth_dep_weights = USE_DEPTH_DEPENDENT_WEIGHTS,
+  tau_scale             = TAU_SCALE,
+  alt_exp               = ALT_EXP,
+  depth_exp            = DEPTH_EXP,
   w_direct            = W_DIRECT,
   w_ambient           = W_AMBIENT,
   w_amb_min           = W_AMBIENT_MIN,
@@ -2600,6 +2777,26 @@ write.csv(validation, val_path, row.names = FALSE)
 message("Saved ", val_path)
 
 
+# -- depth bias ---------------------------------------------------------------
+
+val_with_depth <- validation %>%
+  mutate(residual = pred_par - light_mol,
+         depth_bin = cut(water_depth_m, 
+                         breaks = c(0, 2, 2.5, 3, 3.5, 4, 5),
+                         labels = c("<2m","2-2.5","2.5-3","3-3.5","3.5-4",">4m")))
+
+bias_by_depth <- val_with_depth %>%
+  group_by(sitekey, depth_bin) %>%
+  summarise(n = n(),
+            mean_meas = mean(light_mol, na.rm=TRUE),
+            mean_pred = mean(pred_par, na.rm=TRUE),
+            bias_abs  = mean(residual, na.rm=TRUE),
+            bias_rel  = mean(residual/light_mol, na.rm=TRUE) * 100,
+            rmse      = sqrt(mean(residual^2, na.rm=TRUE)),
+            .groups = "drop")
+
+print(bias_by_depth, n=Inf)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  OPTIONAL — FIT W_DIRECT / W_AMBIENT (and Kd). Pools ALL site/years in
 #  `validation`, so multi-site just gives it a bigger fitting set.
@@ -2610,8 +2807,8 @@ message("Saved ", val_path)
 #  NOT a recommendation to switch back to static mode. Warning prints to remind.
 # ══════════════════════════════════════════════════════════════════════════════
 fit_ambient_weights <- function(validation,
-                                kd_grid = seq(0.05, 0.60, by = 0.01),
-                                wamb_grid = seq(0, 0.95, by = 0.02)) {
+                                kd_grid = seq(0.10, 0.60, by = 0.02),
+                                wamb_grid = seq(0, 0.95, by = 0.05)) {
   if (USE_ALT_DEPENDENT_WEIGHTS) {
     warning("fit_ambient_weights() searches a STATIC W_AMBIENT, but ",
             "USE_ALT_DEPENDENT_WEIGHTS=TRUE. The 'best' value here is the ",
