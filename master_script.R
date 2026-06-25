@@ -107,7 +107,7 @@ geom <- read.csv("geom_new.csv") %>%
 #  long names ("turtle_beach", 2018) the left_join would silently yield NA and
 #  every water_depth_m would become NA.
 # ══════════════════════════════════════════════════════════════════════════════
-
+#####
 # ── PHOTOGRAMMETRY CAPTURE TIMES (local Brisbane time) ────────────────────────
 photogrammetry <- tibble::tribble(
   ~site, ~year, ~capture_dt,         ~abbrev,
@@ -302,6 +302,7 @@ local({
         row.names = FALSE)
 })
 
+#####
 
 # ── FILE-PATH ROOTS ───────────────────────────────────────────────────────────
 #create filepath for DEMS
@@ -309,7 +310,9 @@ DEM_DIR <- "/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems"
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-KD_CONSTANT       <- 0.2  #fallback value      # KD Constant — universal diffuse attenuation coefficient (m⁻¹)
+KD_CONSTANT  <- 0.2   # fallback per-site, AND value used when USE_CONSTANT_KD=TRUE
+USE_CONSTANT_KD <- FALSE   # TRUE = ignore the lookup; apply KD_CONSTANT to every site
+
 
 # which KdPAR variant to apply:
 #   "kdpar_photon" = photon-weighted full-band integral
@@ -321,9 +324,23 @@ kdpar_lookup <- read.csv("kdpar_lookup.csv", stringsAsFactors = FALSE)
 # build a named vector keyed "SITEyy" -> chosen KdPAR, e.g. "CB18" -> 0.2358
 kdpar_lookup$key <- paste0(kdpar_lookup$site, sprintf("%02d", kdpar_lookup$year %% 100))
 KDPAR_BY_KEY <- setNames(kdpar_lookup[[KDPAR_COL]], kdpar_lookup$key)
-
+if (USE_CONSTANT_KD) {
+  KDPAR_BY_KEY[] <- KD_CONSTANT
+  message("USE_CONSTANT_KD ON — overriding every site to Kd = ", KD_CONSTANT)
+}
 message("Loaded per-site KdPAR (", KDPAR_COL, ") for ", length(KDPAR_BY_KEY),
         " site/years. Fallback Kd = ", KD_CONSTANT)
+
+# ── per-site KdPAR printout (sorted, with all three variants for comparison) ──
+local({
+  show <- kdpar_lookup[, c("key", "kdpar_photon", "kdpar_mean", "kdpar_geom", "nbands")]
+  show <- show[order(show$key), ]
+  show[["<- in use"]] <- ifelse(names(KDPAR_BY_KEY)[match(show$key, names(KDPAR_BY_KEY))] == show$key,
+                                paste0("[", KDPAR_COL, "]"), "")
+  cat("\n── Per-site KdPAR (active column = ", KDPAR_COL, ") ──\n", sep = "")
+  print(show, row.names = FALSE, digits = 3)
+})
+
 
 # ── SPECTRAL (depth-dependent) Kd toggle ──────────────────────────────────────
 # FALSE = single photon-weighted KdPAR (your validated main result).
@@ -331,7 +348,7 @@ message("Loaded per-site KdPAR (", KDPAR_COL, ") for ", length(KDPAR_BY_KEY),
 #         depth-dependence then emerges automatically (Canto method). Run BOTH
 #         and compare the DLI plot / RMSE — this is a sensitivity analysis, not
 #         a replacement, until the comparison says otherwise.
-USE_SPECTRAL_KD <- FALSE
+USE_SPECTRAL_KD <- TRUE
 
 WAVES_PAR <- c(412, 443, 469, 488, 531, 547, 555, 645, 667, 678)  # must match kdpar_full.R
 
@@ -367,6 +384,14 @@ if (USE_SPECTRAL_KD) {
 #         SAME units. CHECK the printed transmittance diagnostics before trusting.
 USE_REFERENCE_KD <- FALSE
 
+
+# ── enforce mutual exclusion: constant Kd overrides the others ────────────────
+if (USE_CONSTANT_KD) {
+  USE_SPECTRAL_KD  <- FALSE
+  USE_REFERENCE_KD <- FALSE
+  message("USE_CONSTANT_KD ON — disabling USE_SPECTRAL_KD and USE_REFERENCE_KD")
+}
+
 # Reference loggers — 1..N candidates per site. Per-hour Kd from each candidate
 # is computed independently, then aggregated across candidates by REF_AGG_FUN.
 # Median is more robust than mean if one ref has unmodelled shadow at some hour
@@ -387,7 +412,12 @@ REF_AGG_FUN   <- function(x) stats::median(x, na.rm = TRUE)
 #   4. Set USE_REFERENCE_KD <- TRUE and re-run.
 #   5. Don't re-run the finder unless something structural changes.
 REFERENCE_LOGGER <- list(
-  "TB18" = c("H34", "H40", "H17")
+  "CB19" = c("H48", "H02", "H03"),
+  "GT19" = c("H27", "H44", "H14"),
+  "HS19" = c("H57", "H36", "H52"),
+  "N319" = c("H34", "H51", "H23"),
+  "TB19" = c("H28", "H70", "H46"),
+  "TM19" = c("H67", "H28", "H47")
 )
 
 
@@ -416,7 +446,7 @@ TIMESTEP_INTERVAL <- "1 hour"    # the timestep interval to measure
 # sites. Bigger value = finer disc = slower raytrace (cost scales ~N^2).
 # Smaller value = coarser disc but faster. floor-guarded at MIN_DOWNSAMPLE so
 # we never upsample (a low-res DEM stays at native resolution).
-REEF_RADIUS_PX_TARGET <- 500   # target pixel radius of the reef disc
+REEF_RADIUS_PX_TARGET <- 600   # target pixel radius of the reef disc
 MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already finer
 # zscale still adapts automatically — it is native_pixel_size * (the per-DEM
 # factor), so coarser or finer DEMs each get the correct vertical scaling.
@@ -433,7 +463,7 @@ MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already fine
 #if the resolution is as high as 2mm no matter which projection, then zscale will be a small fraction of 1
 
 #Buffer to extract shadow and ambient values (always matching) in meters
-BUFFER_M <- 0.02
+BUFFER_M <- 0.03
 
 # ── REEF DISC & RAY-SEARCH — ALL IN METRES (replaces pixel-based equivalents) ─
 #
@@ -480,12 +510,12 @@ BUFFER_M <- 0.02
 #  Result: TB18 / CB18 (already tight) should look the same as before; CB19
 #  and other unclipped 2019 DEMs collapse to the same clean disc.
 REEF_RADIUS_M       <- 6.5   # ~13 m diameter disc; matches survey footprint
-MAXSEARCH_M         <- 3   # direct-beam ray distance (m). At TB18's zscale
+MAXSEARCH_M         <- 13  # direct-beam ray distance (m). At TB18's zscale
 # (~0.0123 m/px on a 1062px DEM) this is ~700 px,
 # matching the old MAXSEARCH_FACT=700 — so TB18
 # reproduces previous shadows; other sites become
 # consistent with it.
-AMBIENT_MAXSEARCH_M <- 0.5   # ambient ray distance (m). ~500 px on TB18.
+AMBIENT_MAXSEARCH_M <- 13   # ambient ray distance (m). ~500 px on TB18.
 
 # ── AMBIENT OCCLUSION constants ───────────────────────────────────────────────
 # ambient_shade() models DIFFUSE skylight: for each pixel it fires a fan of rays
@@ -496,7 +526,7 @@ AMBIENT_MAXSEARCH_M <- 0.5   # ambient ray distance (m). ~500 px on TB18.
 # crevice is not pitch black underwater.
 # It depends ONLY on geometry + zscale (NOT sun position), so it is computed ONCE
 # per DEM and reused for every hour.
-USE_AMBIENT <- FALSE # FALSE = pure direct-beam (eff_light = shadow only), sensitivity test
+USE_AMBIENT <- TRUE # FALSE = pure direct-beam (eff_light = shadow only), sensitivity test
 
 AMBIENT_SUNBREAKS  <- 30    # rays sent in a circle around each pixel (rayshader default is 24)
 # maxsearch is set per-DEM inside make_ambient from AMBIENT_MAXSEARCH_M above.
@@ -529,16 +559,16 @@ AMBIENT_SUNBREAKS  <- 30    # rays sent in a circle around each pixel (rayshader
 #  WHY THE TWO MODES COEXIST: static is the simple sensitivity comparator (and
 #  is what fit_ambient_weights() can search). Altitude-dependent is the
 #  physically defensible default. Flip USE_ALT_DEPENDENT_WEIGHTS to compare.
-USE_ALT_DEPENDENT_WEIGHTS <- FALSE   # FALSE = use static W_DIRECT/W_AMBIENT
+USE_ALT_DEPENDENT_WEIGHTS <- TRUE   # FALSE = use static W_DIRECT/W_AMBIENT
 
 # static-mode weights (used when USE_ALT_DEPENDENT_WEIGHTS = FALSE)
 W_DIRECT  <- 0.8
 W_AMBIENT <- 0.2   # NB: W_DIRECT + W_AMBIENT must equal 1
 
 # altitude-dependent-mode endpoints (used when USE_ALT_DEPENDENT_WEIGHTS = TRUE)
-W_AMBIENT_MIN <- 0.10   # diffuse weight at zenith sun (high sun)
-W_AMBIENT_MAX <- 0.60   # diffuse weight at very low sun
-W_AMBIENT_P   <- 2      # shape of the ramp:
+W_AMBIENT_MIN <- 0.05 # diffuse weight at zenith sun (high sun)
+W_AMBIENT_MAX <- 0.9   # diffuse weight at very low sun
+W_AMBIENT_P   <- 1     # shape of the ramp:
 #   1 = linear in (1-sin α) — ramps up early
 #   2 = stays near MIN until ~30°, then ramps up
 # P=2 preserves spatial discrimination through midday
@@ -580,7 +610,116 @@ weight_label <- function() {
   }
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  TUNE ALTITUDE-DEPENDENT DIFFUSE WEIGHTING
+#  3-D grid over (W_AMBIENT_MIN, W_AMBIENT_MAX, W_AMBIENT_P). Per-row Kd held at
+#  its satellite value (so this isolates the curve shape from attenuation).
+#  Honours USE_AMBIENT and the spectral-Kd path. Pooled across all site/years.
+# ══════════════════════════════════════════════════════════════════════════════
+fit_alt_weights <- function(validation,
+                            min_grid = seq(0.00, 0.30, by = 0.05),
+                            max_grid = seq(0.30, 0.85, by = 0.05),
+                            p_grid   = c(1, 1.5, 2, 3, 4)) {
+  
+  if (!USE_AMBIENT) {
+    warning("USE_AMBIENT is FALSE — eff_light is shadow only, weights have no ",
+            "effect. Set USE_AMBIENT <- TRUE before tuning the curve.")
+    return(invisible(NULL))
+  }
+  
+  fitdat <- validation %>%
+    filter(!is.na(shadow_fraction), !is.na(ambient_fraction),
+           !is.na(light_mol), !is.na(surface_par),
+           !is.na(water_depth_m), !is.na(sun_altitude), !is.na(Kd))
+  
+  message("Tuning on ", nrow(fitdat), " rows across ",
+          length(unique(fitdat$sitekey)), " site/years")
+  
+  # Pre-compute the depth-attenuation term ONCE — it doesn't depend on weights,
+  # so recomputing it inside the triple loop would be ~thousands of wasted exp().
+  water_atten <- exp(-fitdat$Kd * fitdat$water_depth_m)
+  sin_alt     <- sin(pmax(fitdat$sun_altitude, 0))
+  
+  grid <- expand.grid(w_min = min_grid, w_max = max_grid, p = p_grid)
+  grid <- grid[grid$w_max > grid$w_min, ]            # enforce MAX > MIN
+  grid$rmse   <- NA_real_
+  grid$r2_1to1 <- NA_real_
+  grid$bias   <- NA_real_
+  
+  for (i in seq_len(nrow(grid))) {
+    w_amb <- grid$w_min[i] +
+      (grid$w_max[i] - grid$w_min[i]) * (1 - sin_alt)^grid$p[i]
+    w_amb <- pmin(pmax(w_amb, 0), 1)
+    eff   <- (1 - w_amb) * fitdat$shadow_fraction + w_amb * fitdat$ambient_fraction
+    pred  <- fitdat$surface_par * eff * water_atten
+    
+    res <- pred - fitdat$light_mol
+    grid$rmse[i]    <- sqrt(mean(res^2, na.rm = TRUE))
+    grid$bias[i]    <- mean(res, na.rm = TRUE)
+    ss_res <- sum(res^2, na.rm = TRUE)
+    ss_tot <- sum((fitdat$light_mol - mean(fitdat$light_mol, na.rm = TRUE))^2,
+                  na.rm = TRUE)
+    grid$r2_1to1[i] <- 1 - ss_res / ss_tot
+  }
+  
+  grid <- grid[order(grid$rmse), ]
+  best <- grid[1, ]
+  
+  cat("\n=====================================================\n")
+  cat("ALTITUDE-DEPENDENT DIFFUSE-WEIGHT CO-FIT\n")
+  cat("=====================================================\n")
+  cat("Searched ", nrow(grid), " (MIN, MAX, P) combinations\n", sep = "")
+  cat("Best W_AMBIENT_MIN :", best$w_min, "\n")
+  cat("Best W_AMBIENT_MAX :", best$w_max, "\n")
+  cat("Best W_AMBIENT_P   :", best$p, "\n")
+  cat("Best RMSE          :", round(best$rmse, 2), "\n")
+  cat("R^2 vs 1:1         :", round(best$r2_1to1, 3), "\n")
+  cat("Bias               :", round(best$bias, 2),
+      "(+ve = over-predicts)\n\n")
+  cat("Top 10 combinations:\n")
+  print(head(grid, 10), row.names = FALSE, digits = 3)
+  
+  # ── visualise the response surface ──────────────────────────────────────────
+  # one MIN x MAX heatmap per P value, so you see which P regime dominates
+  dev.new(width = 4 * length(p_grid), height = 4)
+  par(mfrow = c(1, length(p_grid)), mar = c(4, 4, 3, 1))
+  for (pv in p_grid) {
+    sub <- grid[grid$p == pv, ]
+    if (nrow(sub) < 4) { plot.new(); title(paste0("P=", pv, " (sparse)")); next }
+    mat <- matrix(NA_real_, length(min_grid), length(max_grid),
+                  dimnames = list(min_grid, max_grid))
+    for (k in seq_len(nrow(sub)))
+      mat[as.character(sub$w_min[k]), as.character(sub$w_max[k])] <- sub$rmse[k]
+    image(min_grid, max_grid, mat, col = hcl.colors(100, "viridis"),
+          xlab = "W_AMBIENT_MIN", ylab = "W_AMBIENT_MAX",
+          main = sprintf("P=%g | RMSE", pv))
+    contour(min_grid, max_grid, mat, add = TRUE, col = "white", nlevels = 8)
+    if (best$p == pv)
+      points(best$w_min, best$w_max, pch = 4, col = "red", cex = 2, lwd = 3)
+  }
+  
+  invisible(list(best = best, grid = grid))
+}
 
+alt_fit <- fit_alt_weights(validation)
+
+# per-site best static W_AMBIENT (much faster than 3-D, isolates per-site bias)
+validation %>%
+  group_by(sitekey) %>%
+  group_modify(~ {
+    g <- seq(0, 0.95, by = 0.05)
+    rmse <- sapply(g, function(w) {
+      eff <- (1-w)*.x$shadow_fraction + w*.x$ambient_fraction
+      pred <- .x$surface_par * eff * exp(-.x$Kd * .x$water_depth_m)
+      sqrt(mean((pred - .x$light_mol)^2, na.rm = TRUE))
+    })
+    data.frame(best_w = g[which.min(rmse)], rmse = min(rmse))
+  }) %>% print()
+
+
+
+# To apply the recommendation:
+#   USE_ALT_DEPENDENT_WEIGHTS <- TRUE
 
 # ── UTM PROJECTION ────────────────────────────────────────────────────────────
 # all DEMs are reprojected to UTM zone 55S before processing
@@ -597,6 +736,7 @@ UTM_CRS <- "EPSG:32755"
 # satellite/reference figures can't be confused at a glance. Reads the same
 # toggles the pipeline uses, so it always matches the run that made the figure.
 kd_method_label <- function() {
+  if (USE_CONSTANT_KD)    return(sprintf("constant Kd (%.2f)", KD_CONSTANT))
   if (USE_REFERENCE_KD)   return("reference Kd")
   if (USE_SPECTRAL_KD)    return("spectral Kd")
   paste0("satellite Kd (", KDPAR_COL, ")")
@@ -1536,6 +1676,60 @@ site_years <- env_long_test %>%
 message("Run covers ", nrow(site_years), " site/year combos: ",
         paste(site_years$sitekey, collapse = ", "))
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  RUN SUMMARY — print all active toggles before the slow work begins
+#  Glance at this BEFORE the dem_store build kicks off (each prepare_dem is
+#  expensive; better to catch a wrong toggle now than after 6 ambient_shades).
+# ══════════════════════════════════════════════════════════════════════════════
+cat("\n",
+    "══════════════════════════════════════════════════════════════════\n",
+    " RUN SUMMARY\n",
+    "══════════════════════════════════════════════════════════════════\n",
+    sep = "")
+cat(sprintf("  Sites (%d)              : %s\n",
+            nrow(site_years), paste(site_years$sitekey, collapse = ", ")))
+
+cat("\n  ── Kd / attenuation ──\n")
+cat(sprintf("  KD METHOD                : %s\n", kd_method_label()))
+cat(sprintf("  KDPAR_COL                : %s\n", KDPAR_COL))
+cat(sprintf("  USE_CONSTANT_KD          : %s\n", USE_CONSTANT_KD))
+cat(sprintf("  USE_SPECTRAL_KD          : %s\n", USE_SPECTRAL_KD))
+cat(sprintf("  USE_REFERENCE_KD         : %s\n", USE_REFERENCE_KD))
+if (USE_REFERENCE_KD) {
+  cat(sprintf("    N_REF_LOGGERS          : %d\n", N_REF_LOGGERS))
+  for (sk in names(REFERENCE_LOGGER))
+    cat(sprintf("    %-22s : %s\n", sk,
+                paste(REFERENCE_LOGGER[[sk]], collapse = ", ")))
+}
+cat(sprintf("  KD_CONSTANT (fallback)   : %s\n", KD_CONSTANT))
+cat("  Per-site KdPAR in use    :\n")
+in_run <- intersect(site_years$sitekey, names(KDPAR_BY_KEY))
+for (sk in in_run)
+  cat(sprintf("    %-6s : %s\n", sk, round(KDPAR_BY_KEY[[sk]], 3)))
+missing_kd <- setdiff(site_years$sitekey, names(KDPAR_BY_KEY))
+if (length(missing_kd) > 0)
+  cat(sprintf("    (no satellite Kd for: %s — will use fallback %.2f)\n",
+              paste(missing_kd, collapse = ", "), KD_CONSTANT))
+
+cat("\n  ── Direct/ambient weighting ──\n")
+cat(sprintf("  USE_AMBIENT              : %s\n", USE_AMBIENT))
+cat(sprintf("  USE_ALT_DEPENDENT_WEIGHTS: %s\n", USE_ALT_DEPENDENT_WEIGHTS))
+cat(sprintf("  WEIGHTS                  : %s\n", weight_label()))
+
+cat("\n  ── DEM / raytrace geometry ──\n")
+cat(sprintf("  REEF_RADIUS_M            : %s m\n", REEF_RADIUS_M))
+cat(sprintf("  REEF_RADIUS_PX_TARGET    : %s px\n", REEF_RADIUS_PX_TARGET))
+cat(sprintf("  MIN_DOWNSAMPLE           : %s\n", MIN_DOWNSAMPLE))
+cat(sprintf("  MAXSEARCH_M              : %s m (direct beam)\n", MAXSEARCH_M))
+cat(sprintf("  AMBIENT_MAXSEARCH_M      : %s m\n", AMBIENT_MAXSEARCH_M))
+cat(sprintf("  AMBIENT_SUNBREAKS        : %s\n", AMBIENT_SUNBREAKS))
+cat(sprintf("  BUFFER_M (logger extract): %s m\n", BUFFER_M))
+
+
+cat("\n  ── Time ──\n")
+cat(sprintf("  TIMESTEP_INTERVAL        : %s\n", TIMESTEP_INTERVAL))
+
+cat("══════════════════════════════════════════════════════════════════\n\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LOAD ALL SPATIAL DATA ONCE  →  dem_store
@@ -1544,7 +1738,6 @@ message("Run covers ", nrow(site_years), " site/year combos: ",
 #  instead of recomputing.
 # ══════════════════════════════════════════════════════════════════════════════
 dem_store <- list()
-
 for (i in seq_len(nrow(site_years))) {
   s   <- site_years$site[i]
   y   <- site_years$year[i]
@@ -1643,78 +1836,12 @@ message("Validation rows: ", nrow(validation),
         " across ", length(unique(validation$sitekey)), " site/years")
 
 
-# ── RUN MANIFEST ─────────────────────────────────────────────────────────────
-
-# ── RUN MANIFEST ──────────────────────────────────────────────────────────────
-
-# ── RUN MANIFEST ──────────────────────────────────────────────────────────────
-
-sink("run_manifest.txt")
-
-cat("RUN DATE: ", format(Sys.time()), "\n\n", sep = "")
-
-cat("SITES:\n")
-cat("  ", paste(sort(unique(validation$sitekey)), collapse = ", "), "\n\n", sep = "")
-
-cat("SETTINGS:\n")
-
-cat("  USE_REFERENCE_KD          =", USE_REFERENCE_KD, "\n")
-cat("  USE_SPECTRAL_KD           =", USE_SPECTRAL_KD, "\n")
-cat("  USE_AMBIENT               =", USE_AMBIENT, "\n")
-cat("  USE_ALT_DEPENDENT_WEIGHTS =", USE_ALT_DEPENDENT_WEIGHTS, "\n\n")
-
-cat("  REEF_RADIUS_M             =", REEF_RADIUS_M, "\n")
-cat("  REEF_RADIUS_PX_TARGET     =", REEF_RADIUS_PX_TARGET, "\n")
-cat("  MIN_DOWNSAMPLE            =", MIN_DOWNSAMPLE, "\n\n")
-
-cat("  MAXSEARCH_M               =", MAXSEARCH_M, "\n")
-cat("  AMBIENT_MAXSEARCH_M       =", AMBIENT_MAXSEARCH_M, "\n")
-cat("  AMBIENT_SUNBREAKS         =", paste(AMBIENT_SUNBREAKS, collapse = ", "), "\n\n")
-
-cat("  W_DIRECT                  =", W_DIRECT, "\n")
-cat("  W_AMBIENT                 =", W_AMBIENT, "\n")
-cat("  W_AMBIENT_MIN             =", W_AMBIENT_MIN, "\n")
-cat("  W_AMBIENT_MAX             =", W_AMBIENT_MAX, "\n")
-cat("  W_AMBIENT_P               =", W_AMBIENT_P, "\n\n")
-
-cat("  TIMESTEP_INTERVAL         =", TIMESTEP_INTERVAL, "\n")
-cat("  BUFFER_M                  =", BUFFER_M, "\n")
-cat("  KDPAR_COL                 =", KDPAR_COL, "\n")
-
-if (USE_ALT_DEPENDENT_WEIGHTS) {
-  
-  cat("\nALTITUDE WEIGHT SETTINGS:\n")
-  cat("  BREAKS =", paste(ALT_WEIGHT_BREAKS, collapse = ", "), "\n")
-  cat("  VALUES =", paste(ALT_WEIGHT_VALUES, collapse = ", "), "\n")
-  
-}
-
-if (USE_REFERENCE_KD) {
-  
-  cat("\nREFERENCE LOGGERS:\n")
-  
-  for (site in names(REFERENCE_LOGGER)) {
-    cat("  ", site, ": ",
-        paste(REFERENCE_LOGGER[[site]], collapse = ", "),
-        "\n", sep = "")
-  }
-  
-}
-
-sink()
-
-message("Saved run_manifest.txt")
-
-# Base R
-write.csv(validation, "validation.csv", row.names = FALSE)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  REFERENCE-LOGGER FINDER  (geometric openness + midday agreement)
 #  ──────────────────────────────────────────────────────────────────────────
 #  Picks N representative loggers per site to invert Beer-Lambert for Kd(t).
 #  Score = weighted blend of TWO families of evidence:
-#
+#####
 #  GEOMETRIC OPENNESS (the model says it's open) — from shadow & ambient
 #    • shadow_mean : average openness across all daytime hours
 #    • shadow_min  : worst-case openness (penalises loggers shaded part of day)
@@ -1894,8 +2021,15 @@ find_reference_loggers <- function(val,
 
 # Score from validation (needs light_mol). See bootstrap workflow in the
 # REFERENCE_LOGGER block above.
-ref_candidates <- find_reference_loggers(validation)
+ref_candidates <- find_reference_loggers(validation)#start
+#######
 
+
+# ── RUN TAG (set once; used in every saved PNG filename + title) ──────────────
+RUN_TAG     <- format(Sys.time(), "%Y%m%d_%H%M%S")
+RUNS_ROOT   <- "runs"                              # parent folder; holds metrics_log.csv
+RUNS_DIR    <- file.path(RUNS_ROOT, RUN_TAG)       # this run's own folder
+dir.create(RUNS_DIR, showWarnings = FALSE, recursive = TRUE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1915,7 +2049,8 @@ plot_par_panels_one_site <- function(key, val_all) {
   kd_disp <- if (USE_REFERENCE_KD) "per-hour"
   else ifelse(key %in% names(KDPAR_BY_KEY), round(KDPAR_BY_KEY[[key]],3), KD_CONSTANT)
   plot_title  <- paste0(
-    key, " | ", kd_method_label(), " | ", date_range[1], " to ", date_range[2], "\n",
+    key, " | ", RUN_TAG, " | ", kd_method_label(), " | ",
+    date_range[1], " to ", date_range[2], "\n",
     "Kd=", kd_disp, " | zscale=", round(dem_store[[key]]$dem$zscale, 4), " (UTM)",
     " | interval=", TIMESTEP_INTERVAL, " | ~", out_px, "px matrix",
     " | reef=", REEF_RADIUS_M, "m (~", REEF_RADIUS_PX_TARGET, "px target)",
@@ -1937,7 +2072,7 @@ plot_par_panels_one_site <- function(key, val_all) {
     rep(legend_cell, n_cols)
   )
   
-  png(paste0("par_panels_", key, ".png"),
+  png(file.path(RUNS_DIR, paste0("par_panels_", key, "_", RUN_TAG, ".png")),
       width = n_cols * 360, height = n_rows * 300 + 220, res = 130)
   layout(layout_mat, heights = c(0.8, rep(3, n_rows), 0.8))
   
@@ -2015,7 +2150,7 @@ plot_shadow_multipanel_one_site <- function(key, output_all, val_all) {
     
     par(mar = c(0, 0, 0, 0)); plot.new()
     text(0.5, 0.5,
-         paste0(key, "  |  ", kd_method_label(),
+         paste0(key, "  |  ", RUN_TAG, "  |  ", kd_method_label(),
                 "  |  Kd=", if (USE_REFERENCE_KD) "per-hour"
                 else ifelse(key %in% names(KDPAR_BY_KEY), round(KDPAR_BY_KEY[[key]],3), KD_CONSTANT),
                 "  | zscale=", round(dem$zscale, 4), " (UTM)",
@@ -2085,13 +2220,14 @@ plot_shadow_multipanel_one_site <- function(key, output_all, val_all) {
            title = "Bar chart key")
   }
   
-  png(paste0("shadow_multipanel_", key, ".png"),
+png(file.path(RUNS_DIR, paste0("shadow_multipanel_", key, "_", RUN_TAG, ".png")),
       width = n_cols * 800, height = n_rows * 1100 + 200, res = 150)
   draw(); dev.off()
   message("  saved shadow_multipanel_", key, ".png")
 }
 
 for (key in names(dem_store)) plot_shadow_multipanel_one_site(key, output, validation)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2177,7 +2313,9 @@ pt_col  <- col_pal[
   pmax(1, pmin(100, round((col_vals - col_rng[1]) / diff(col_rng) * 99) + 1))
 ]
 
-dev.new(width = 8, height = 7)
+
+png(file.path(RUNS_DIR, sprintf("pooled_dli_%s.png", RUN_TAG)),
+    width = 8 * 130, height = 7 * 130, res = 130)
 par(mar = c(5, 5, 4, 7), xpd = FALSE)
 lim <- range(c(dli$dli_measured, dli$dli_predicted), na.rm = TRUE)
 
@@ -2215,6 +2353,9 @@ text(strip_x, max(strip_y) + diff(lim) * 0.03, col_lab, cex = 0.8, font = 2, adj
 text(strip_x + diff(lim) * 0.04, min(strip_y), round(col_rng[1], col_dig), cex = 0.7, adj = 0)
 text(strip_x + diff(lim) * 0.04, max(strip_y), round(col_rng[2], col_dig), cex = 0.7, adj = 0)
 par(xpd = FALSE)
+dev.off()
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  POOLED FIGURE 2 — observed vs predicted PAR at selected hours
@@ -2242,7 +2383,9 @@ if (nrow(time_df) > 0) {
                     "17" = "#CC79A7")   # late aft — magenta
   col2 <- hour_cols[as.character(time_df$hour)]
   
-  dev.new(width = 8, height = 7)
+  
+  png(file.path(RUNS_DIR, sprintf("pooled_perhour_%s.png", RUN_TAG)),
+      width = 8 * 130, height = 7 * 130, res = 130)
   par(mar = c(5, 5, 4, 7))
   plot(time_df$light_mol, time_df$pred_par,
        pch = pch_map2[time_df$sitekey], col = col2, cex = 1.4, lwd = 2,
@@ -2279,7 +2422,183 @@ if (nrow(time_df) > 0) {
          legend = keys2, pch = pch_map2[keys2], pt.cex = 1.3, pt.lwd = 2,
          bty = "n", title = "Site/year")
   par(xpd = FALSE)
+  dev.off()
+  
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RUN OUTPUTS — per-run manifest + metrics + accumulating sweep log
+#  ──────────────────────────────────────────────────────────────────────────
+#  Each run produces THREE artefacts in RUNS_DIR:
+#    1. manifest_<RUN_TAG>.txt   — human-readable settings + metrics summary
+#    2. metrics_<RUN_TAG>.csv    — full per-site + pooled metrics table
+#    3. metrics_log.csv          — APPENDS one summary row per run (sweeps)
+#
+#  RUN_TAG is a timestamp so nothing overwrites between runs.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── metrics helper ────────────────────────────────────────────────────────────
+metrics <- function(obs, pred) {
+  ok <- is.finite(obs) & is.finite(pred)
+  obs <- obs[ok]; pred <- pred[ok]
+  n   <- length(obs)
+  if (n < 2) return(data.frame(n=n, rmse=NA, mae=NA, bias=NA,
+                               r2=NA, r2_1to1=NA, slope=NA, intercept=NA))
+  res    <- pred - obs
+  rmse   <- sqrt(mean(res^2))
+  mae    <- mean(abs(res))
+  bias   <- mean(res)                              # +ve = over-predicts
+  ss_res <- sum(res^2)
+  ss_tot <- sum((obs - mean(obs))^2)
+  r2_1to1 <- 1 - ss_res / ss_tot                   # Nash-Sutcliffe vs 1:1
+  fit    <- lm(pred ~ obs)
+  r2     <- summary(fit)$r.squared                 # Pearson R² (best-fit line)
+  data.frame(n=n, rmse=rmse, mae=mae, bias=bias,
+             r2=r2, r2_1to1=r2_1to1,
+             slope=coef(fit)[2], intercept=coef(fit)[1])
+}
+
+# ── (a) HOURLY metrics ────────────────────────────────────────────────────────
+hourly_per_site <- validation %>%
+  group_by(sitekey) %>%
+  group_modify(~ metrics(.x$light_mol, .x$pred_par)) %>%
+  ungroup() %>% mutate(level = "hourly_per_site")
+
+hourly_overall <- metrics(validation$light_mol, validation$pred_par) %>%
+  mutate(sitekey = "ALL", level = "hourly_overall")
+
+# ── (b) DLI metrics (deployment sums, mol m^-2) ───────────────────────────────
+dli_per_site <- dli %>%
+  group_by(sitekey) %>%
+  group_modify(~ metrics(.x$dli_measured, .x$dli_predicted)) %>%
+  ungroup() %>% mutate(level = "dli_per_site")
+
+dli_overall <- metrics(dli$dli_measured, dli$dli_predicted) %>%
+  mutate(sitekey = "ALL", level = "dli_overall")
+
+metrics_tbl <- bind_rows(hourly_overall, hourly_per_site,
+                         dli_overall,    dli_per_site) %>%
+  select(level, sitekey, n, rmse, mae, bias, r2, r2_1to1, slope, intercept)
+
+# ── print to console ──────────────────────────────────────────────────────────
+cat("\n================ VALIDATION METRICS ================\n")
+cat(sprintf("Run tag: %s\n", RUN_TAG))
+cat(sprintf("Kd method: %s | weights: %s\n", kd_method_label(), weight_label()))
+cat(sprintf("REEF_RADIUS_M=%.1f  MAXSEARCH_M=%.1f  AMBIENT_MAXSEARCH_M=%.2f\n",
+            REEF_RADIUS_M, MAXSEARCH_M, AMBIENT_MAXSEARCH_M))
+print(metrics_tbl, row.names = FALSE, digits = 3)
+
+# ── save per-run metrics table ────────────────────────────────────────────────
+write.csv(metrics_tbl,
+          file.path(RUNS_DIR, sprintf("metrics_%s.csv", RUN_TAG)),
+          row.names = FALSE)
+
+# ── HUMAN-READABLE PER-RUN MANIFEST ───────────────────────────────────────────
+manifest_path <- file.path(RUNS_DIR, sprintf("manifest_%s.txt", RUN_TAG))
+sink(manifest_path)
+
+cat("RUN TAG : ", RUN_TAG, "\n", sep = "")
+cat("RUN DATE: ", format(Sys.time()), "\n\n", sep = "")
+
+cat("SITES:\n")
+cat("  ", paste(sort(unique(validation$sitekey)), collapse = ", "), "\n\n", sep = "")
+
+cat("KD METHOD : ", kd_method_label(), "\n", sep = "")
+cat("WEIGHTING : ", weight_label(),    "\n\n", sep = "")
+
+cat("SETTINGS:\n")
+cat("  USE_CONSTANT_KD           =", USE_CONSTANT_KD, "\n")
+cat("  USE_REFERENCE_KD          =", USE_REFERENCE_KD, "\n")
+cat("  USE_SPECTRAL_KD           =", USE_SPECTRAL_KD, "\n")
+cat("  USE_AMBIENT               =", USE_AMBIENT, "\n")
+cat("  USE_ALT_DEPENDENT_WEIGHTS =", USE_ALT_DEPENDENT_WEIGHTS, "\n\n")
+
+cat("  REEF_RADIUS_M             =", REEF_RADIUS_M, "\n")
+cat("  REEF_RADIUS_PX_TARGET     =", REEF_RADIUS_PX_TARGET, "\n")
+cat("  MIN_DOWNSAMPLE            =", MIN_DOWNSAMPLE, "\n\n")
+
+cat("  MAXSEARCH_M               =", MAXSEARCH_M, "\n")
+cat("  AMBIENT_MAXSEARCH_M       =", AMBIENT_MAXSEARCH_M, "\n")
+cat("  AMBIENT_SUNBREAKS         =", paste(AMBIENT_SUNBREAKS, collapse = ", "), "\n\n")
+
+cat("  KDPAR_COL                 =", KDPAR_COL, "\n")
+cat("  KD_CONSTANT               =", KD_CONSTANT, "\n")
+
+cat("  W_DIRECT                  =", W_DIRECT, "\n")
+cat("  W_AMBIENT                 =", W_AMBIENT, "\n")
+cat("  W_AMBIENT_MIN             =", W_AMBIENT_MIN, "\n")
+cat("  W_AMBIENT_MAX             =", W_AMBIENT_MAX, "\n")
+cat("  W_AMBIENT_P               =", W_AMBIENT_P, "\n\n")
+
+cat("  TIMESTEP_INTERVAL         =", TIMESTEP_INTERVAL, "\n")
+cat("  BUFFER_M                  =", BUFFER_M, "\n")
+cat("  KDPAR_COL                 =", KDPAR_COL, "\n")
+
+if (USE_REFERENCE_KD) {
+  cat("\nREFERENCE LOGGERS:\n")
+  for (site in names(REFERENCE_LOGGER)) {
+    cat("  ", site, ": ",
+        paste(REFERENCE_LOGGER[[site]], collapse = ", "),
+        "\n", sep = "")
+  }
+}
+
+cat("\n================ VALIDATION METRICS ================\n")
+print(metrics_tbl, row.names = FALSE, digits = 3)
+
+sink()
+message("Saved ", manifest_path)
+
+# ── APPEND one-row summary to the accumulating sweep log ──────────────────────
+log_row <- data.frame(
+  run_tag             = RUN_TAG,
+  sites               = paste(sort(unique(validation$sitekey)), collapse = ";"),
+  kd_method           = kd_method_label(),
+  kdpar_col           = KDPAR_COL,
+  use_spectral_kd     = USE_SPECTRAL_KD,
+  use_reference_kd    = USE_REFERENCE_KD,
+  use_ambient         = USE_AMBIENT,
+  use_alt_dep_weights = USE_ALT_DEPENDENT_WEIGHTS,
+  w_direct            = W_DIRECT,
+  w_ambient           = W_AMBIENT,
+  w_amb_min           = W_AMBIENT_MIN,
+  w_amb_max           = W_AMBIENT_MAX,
+  w_amb_p             = W_AMBIENT_P,
+  reef_radius_m       = REEF_RADIUS_M,
+  reef_radius_px      = REEF_RADIUS_PX_TARGET,
+  maxsearch_m         = MAXSEARCH_M,
+  ambient_maxsearch_m = AMBIENT_MAXSEARCH_M,
+  ambient_sunbreaks   = AMBIENT_SUNBREAKS,
+  timestep            = TIMESTEP_INTERVAL,
+  buffer_m            = BUFFER_M,
+  pool_sites          = paste(pool_keys, collapse = ";"),
+  n_hourly            = hourly_overall$n,
+  rmse_hourly         = hourly_overall$rmse,
+  r2_hourly           = hourly_overall$r2,
+  r2_1to1_hourly      = hourly_overall$r2_1to1,
+  bias_hourly         = hourly_overall$bias,
+  n_dli               = dli_overall$n,
+  rmse_dli            = dli_overall$rmse,
+  r2_dli              = dli_overall$r2,
+  r2_1to1_dli         = dli_overall$r2_1to1,
+  bias_dli            = dli_overall$bias,
+  stringsAsFactors    = FALSE
+)
+
+log_path <- file.path(RUNS_ROOT, "metrics_log.csv")
+if (file.exists(log_path)) {
+  write.table(log_row, log_path, sep = ",", append = TRUE,
+              row.names = FALSE, col.names = FALSE)
+} else {
+  write.csv(log_row, log_path, row.names = FALSE)
+}
+message("Appended sweep summary to ", log_path)
+
+# ── save per-run validation CSV ───────────────────────────────────────────────
+val_path <- file.path(RUNS_DIR, sprintf("validation_%s.csv", RUN_TAG))
+write.csv(validation, val_path, row.names = FALSE)
+message("Saved ", val_path)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  OPTIONAL — FIT W_DIRECT / W_AMBIENT (and Kd). Pools ALL site/years in
