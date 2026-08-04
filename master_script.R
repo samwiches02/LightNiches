@@ -55,6 +55,7 @@ library(tidyr)       # data reshaping
 library(lubridate)   # date-time helper
 library(readr)       # tidyverse uses this
 library(TideHarmonics)  # harmonic tide fit for the capture-tide depth correction
+sessionInfo()
 
 
 
@@ -79,6 +80,20 @@ geom <- read.csv("geom_new.csv") %>%
   distinct(rec, year, new_unit, lon, lat) %>%     # one row per logger per site/year
   rename(site = rec, hoboID = new_unit) %>% #renames columns to match with env_long
   mutate(year = as.integer(year))
+
+
+# back in master_script, after `geom` is loaded:
+LOGGER_OFFSETS <- tibble::tribble(
+  ~site, ~year, ~hoboID, ~dx_m, ~dy_m,
+  # "TB",  19L,   "H50",   0.15, -0.10, #add if needed 
+)
+
+# apply to lon/lat (geom is in local tmerc, units = metres, so dx/dy add directly)
+geom <- geom %>%
+  left_join(LOGGER_OFFSETS, by = c("site", "year", "hoboID")) %>%
+  mutate(lon = lon + ifelse(is.na(dx_m), 0, dx_m),
+         lat = lat + ifelse(is.na(dy_m), 0, dy_m)) %>%
+  select(-dx_m, -dy_m)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -259,7 +274,7 @@ capture_tide <- photogrammetry %>%
 #  Keyed by `abbrev`. Any abbrev NOT listed keeps its harmonic value.
 #  Leave a value as NA to force the old -2 m fallback in run_pipeline instead.
 CAPTURE_TIDE_OVERRIDE <- c(
-  # "CB18" = 0.00   # <-- REQUIRED for CB18: external Lizard tide @ 2018-11-02 08:32
+  "CB18" = 1.13   # <-- REQUIRED for CB18: external Lizard tide @ 2018-11-02 08:32
   # "GT17" = 0.00,  # only needed if you add 2017 sites
   # "N317" = 0.00,
   # "SE17" = 0.00,
@@ -308,16 +323,81 @@ local({
 #create filepath for DEMS
 DEM_DIR <- "/Users/samueleszenyi/Desktop/MEM MSc/1thesis/dems"
 
-# ── constants ─────────────────────────────────────────────────────────────────
 
-KD_CONSTANT  <- 0.32   # fallback per-site, AND value used when USE_CONSTANT_KD=TRUE
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  RUN CONFIG — reproduces run 20260702_204808 (chosen model, reference Kd)
+#  9 sites, RMSE 205, hourly R² 0.56
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Sites ────────────────────────────────────────────────────────────────
+SITES <- c("CB18", "CB19", "HS19",
+           "N318", "N319",
+           "TB18", "TB19",
+           "TM18", "TM19")
+
+# ── Kd method (only USE_REFERENCE_KD = TRUE) ─────────────────────────────
+USE_CONSTANT_KD             <- FALSE
+USE_REFERENCE_KD            <- TRUE
+USE_SPECTRAL_KD             <- FALSE
+
+# ── Ambient + weighting scheme ───────────────────────────────────────────
+USE_AMBIENT                 <- TRUE
+USE_ALT_DEPENDENT_WEIGHTS   <- TRUE
+USE_DEPTH_DEPENDENT_WEIGHTS <- TRUE
+TAU_SCALE                   <- 0.5
+ALT_EXP                     <- 0.8
+DEPTH_EXP                   <- 1.8
+
+# ── DEM / raytrace geometry ──────────────────────────────────────────────
+REEF_RADIUS_M               <- 6.5
+REEF_RADIUS_PX_TARGET       <- 800
+MIN_DOWNSAMPLE              <- 1
+MAXSEARCH_M                 <- 13
+AMBIENT_MAXSEARCH_M         <- 6.5
+AMBIENT_SUNBREAKS           <- 30
+
+# ── Kd + weight parameters ───────────────────────────────────────────────
+KDPAR_COL                   <- "kdpar_photon"
+KD_CONSTANT                 <- 0.2   # unused (USE_CONSTANT_KD = FALSE)
+W_DIRECT                    <- 0.3   # base value (overwritten by alt-dep)
+W_AMBIENT                   <- 0.7   # base value (overwritten by alt-dep)
+W_AMBIENT_MIN               <- 0.15
+W_AMBIENT_MAX               <- 0.8
+W_AMBIENT_P                 <- 1
+
+# ── Timestep + sensor extraction ─────────────────────────────────────────
+TIMESTEP_INTERVAL           <- "1 hour"
+BUFFER_M                    <- 0.06
+
+# ── Reference loggers per site ───────────────────────────────────────────
+REFERENCE_LOGGER <- list(
+  CB18 = c("H47", "H37", "H46", "H18"),
+  CB19 = c("H48", "H02", "H47", "H44", "H03"),
+  HS19 = c("H36", "H03", "H51", "H67"),
+  N318 = c("H05", "H15", "H03", "H44", "H35"),
+  N319 = c("H34", "H31", "H39", "H51"),
+  TB18 = c("H34"),
+  TB19 = c("H47", "H18", "H05"),
+  TM18 = c("H37", "H33", "H15", "H18"),
+  TM19 = c("H28", "H47")
+)
+
+
+
+
+
+
+
+# ── constants ─────────────────────────────────────────────────────────────────
+KD_CONSTANT  <- 0.2   # fallback per-site, AND value used when USE_CONSTANT_KD=TRUE
 USE_CONSTANT_KD <- FALSE   # TRUE = ignore the lookup; apply KD_CONSTANT to every site
 
 # Per-site implied Kd from residuals
 # Beer-Lambert: pred = surface * eff * exp(-Kd_used * z)
 #               meas = surface * eff * exp(-Kd_true * z)
 # => Kd_true = Kd_used + ln(pred/meas) / z
-
+if (exists("validation")){
 kd_implied <- validation %>%
   filter(is.finite(pred_par), is.finite(light_mol),
          pred_par > 50, light_mol > 50,         # daylight only
@@ -333,11 +413,12 @@ kd_implied <- validation %>%
             .groups = "drop")
 
 print(kd_implied)
-
+}
 # which KdPAR variant to apply:
 #   "kdpar_photon" = photon-weighted full-band integral
 #   "kdpar_mean"   = unweighted mean of the 10 bands
 #   "kdpar_geom"   = geometric mean, red-outlier-resistant
+#   "kdpar_490corr" = 490 correlated band
 KDPAR_COL <- "kdpar_photon"
 
 kdpar_lookup <- read.csv("kdpar_lookup.csv", stringsAsFactors = FALSE)
@@ -353,14 +434,13 @@ message("Loaded per-site KdPAR (", KDPAR_COL, ") for ", length(KDPAR_BY_KEY),
 
 # ── per-site KdPAR printout (sorted, with all three variants for comparison) ──
 local({
-  show <- kdpar_lookup[, c("key", "kdpar_photon", "kdpar_mean", "kdpar_geom", "nbands")]
+  show <- kdpar_lookup[, c("key", "kdpar_photon", "kdpar_mean", "kdpar_geom", "kdpar_490corr", "nbands")]
   show <- show[order(show$key), ]
   show[["<- in use"]] <- ifelse(names(KDPAR_BY_KEY)[match(show$key, names(KDPAR_BY_KEY))] == show$key,
                                 paste0("[", KDPAR_COL, "]"), "")
   cat("\n── Per-site KdPAR (active column = ", KDPAR_COL, ") ──\n", sep = "")
   print(show, row.names = FALSE, digits = 3)
 })
-
 
 # ── PER-SITE Kd OVERRIDE HOOK ─────────────────────────────────────────────────
 #  Manually replace the satellite KdPAR for specific site/years. Useful when the
@@ -373,12 +453,12 @@ local({
 #  Kd(t) supersedes the per-site scalar). Only takes effect on satellite-Kd
 #  runs and on the spectral path's fallback.
 KDPAR_OVERRIDE <- c(
-  "CB19" = 0.28, #mean
-  "GT19" = 0.30, #mean
-  "HS19" = 0.27, #median
-  "N319" = 0.32, #median
-  "TB19" = 0.58, #median
-  "TM19" = 0.42 #median
+  #"CB19" = 0.28, #mean
+  #"GT19" = 0.30, #mean
+  #"HS19" = 0.27, #median
+  #"N319" = 0.32, #median
+  #"TB19" = 0.58, #median
+  #"TM19" = 0.42 #median
 )
 
 if (length(KDPAR_OVERRIDE) > 0 && !USE_CONSTANT_KD && !USE_REFERENCE_KD) {
@@ -436,7 +516,7 @@ if (USE_SPECTRAL_KD) {
 #         from validation, so this is not circular — but it requires a genuinely
 #         UNSHADED reference at correct depth, and ref_light & surface_par in the
 #         SAME units. CHECK the printed transmittance diagnostics before trusting.
-USE_REFERENCE_KD <- FALSE
+USE_REFERENCE_KD <- TRUE
 
 
 # ── enforce mutual exclusion: constant Kd overrides the others ────────────────
@@ -465,15 +545,18 @@ REF_AGG_FUN   <- function(x) stats::median(x, na.rm = TRUE)
 #   3. Paste that block in here.
 #   4. Set USE_REFERENCE_KD <- TRUE and re-run.
 #   5. Don't re-run the finder unless something structural changes.
+# Reference loggers per site
 REFERENCE_LOGGER <- list(
-  "CB19" = c("H11", "H57"),
-  "GT19" = c("H27", "H37"),
-  "HS19" = c("H57", "H52"),
-  "N319" = c("H44", "H01"),
-  "TB19" = c("H47", "H18", "H52", "H05", "H46"),
-  "TM19" = c("H67", "H28", "H47")
+  CB18 = c("H47","H37","H46","H18"),
+  CB19 = c("H48","H02","H47","H44","H03"),
+  HS19 = c("H36","H03","H51","H67"),
+  N318 = c("H05","H15","H03","H44","H35"),
+  N319 = c("H34","H31","H39","H51"),
+  TB18 = c("H34"),
+  TB19 = c("H47","H18","H05"),
+  TM18 = c("H37","H33","H15","H18"),
+  TM19 = c("H28","H47")
 )
-
 
 TIMESTEP_INTERVAL <- "1 hour"    # the timestep interval to measure
 
@@ -500,7 +583,7 @@ TIMESTEP_INTERVAL <- "1 hour"    # the timestep interval to measure
 # sites. Bigger value = finer disc = slower raytrace (cost scales ~N^2).
 # Smaller value = coarser disc but faster. floor-guarded at MIN_DOWNSAMPLE so
 # we never upsample (a low-res DEM stays at native resolution).
-REEF_RADIUS_PX_TARGET <- 600   # target pixel radius of the reef disc
+REEF_RADIUS_PX_TARGET <- 800   # target pixel radius of the reef disc
 MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already finer
 # zscale still adapts automatically — it is native_pixel_size * (the per-DEM
 # factor), so coarser or finer DEMs each get the correct vertical scaling.
@@ -517,7 +600,7 @@ MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already fine
 #if the resolution is as high as 2mm no matter which projection, then zscale will be a small fraction of 1
 
 #Buffer to extract shadow and ambient values (always matching) in meters
-BUFFER_M <- 0.7
+BUFFER_M <- 0.06
 
 # ── REEF DISC & RAY-SEARCH — ALL IN METRES (replaces pixel-based equivalents) ─
 #
@@ -583,28 +666,50 @@ MAXSEARCH_M         <- 13  # direct-beam ray distance (m). At TB18's zscale
 # per DEM and reused for every hour.
 USE_AMBIENT <- TRUE # FALSE = pure direct-beam (eff_light = shadow only), sensitivity test
 
-AMBIENT_MAXSEARCH_M <- 13   # ambient ray distance (m). ~500 px on TB18.
+AMBIENT_MAXSEARCH_M <- 6.5   # ambient ray distance (m). ~500 px on TB18.
 AMBIENT_SUNBREAKS  <- 30    # rays sent in a circle around each pixel (rayshader default is 24)
 
+
+
+
+# WHY w_direct + w_ambient = 1:
+# These are the PARTITION of incoming surface PAR into its direct-beam and
+# diffuse-sky components — physically exhaustive (no third component), so the
+# two fractions sum to 1 by definition. This keeps eff_light in [0,1] and gives
+# it a clean meaning: "fraction of surface PAR surviving geometry (beam-block +
+# sky-occlusion) before depth attenuation." A fully open, full-sky pixel then
+# gives eff_light = 1 (no geometric loss), so surface_par carries magnitude and
+# water_atten carries depth loss — each term does exactly one job.
+#
+# Could we instead fit eff = a*shadow + b*ambient with a,b free (a+b != 1)? Yes,
+# it runs — but a+b != 1 rescales surface_par implicitly, so a,b stop being a
+# beam/diffuse split and start absorbing any surface_par calibration/unit error.
+# That can lower RMSE while destroying physical interpretability, adds a weakly-
+# identifiable parameter (shadow & ambient are correlated; scale trades off with
+# Kd and surface_par), and breaks comparability across the static/alt/depth
+# weighting toggles, which all assume w_ambient in [0,1].
+# If surface_par's absolute scale is the real worry, add ONE explicit scale
+# parameter and keep w_direct + w_ambient = 1 — fix calibration in its own term,
+# not by loosening the partition.
 # maxsearch is set per-DEM inside make_ambient from AMBIENT_MAXSEARCH_M above.
 # static-mode weights (used when USE_ALT_DEPENDENT_WEIGHTS = FALSE)
 W_DIRECT  <- 0.3
-W_AMBIENT <- 0.7   # NB: W_DIRECT + W_AMBIENT must equal 1
+W_AMBIENT <- 0.7   # NB: W_DIRECT + W_AMBIENT equal 1
 
 
 # per-site best static W_AMBIENT (much faster than 3-D, isolates per-site bias) (doesnt work before validation is created)
 if (exists("validation")){
-validation %>%
-  group_by(sitekey) %>%
-  group_modify(~ {
-    g <- seq(0, 0.95, by = 0.05)
-    rmse <- sapply(g, function(w) {
-      eff <- (1-w)*.x$shadow_fraction + w*.x$ambient_fraction
-      pred <- .x$surface_par * eff * exp(-.x$Kd * .x$water_depth_m)
-      sqrt(mean((pred - .x$light_mol)^2, na.rm = TRUE))
-    })
-    data.frame(best_w = g[which.min(rmse)], rmse = min(rmse))
-  }) %>% print()
+  validation %>%
+    group_by(sitekey) %>%
+    group_modify(~ {
+      g <- seq(0, 0.95, by = 0.05)
+      rmse <- sapply(g, function(w) {
+        eff <- (1-w)*.x$shadow_fraction + w*.x$ambient_fraction
+        pred <- .x$surface_par * eff * exp(-.x$Kd * .x$water_depth_m)
+        sqrt(mean((pred - .x$light_mol)^2, na.rm = TRUE))
+      })
+      data.frame(best_w = g[which.min(rmse)], rmse = min(rmse))
+    }) %>% print()
 }
 
 
@@ -643,8 +748,8 @@ USE_DEPTH_DEPENDENT_WEIGHTS <- TRUE   # NEW toggle, sits alongside USE_ALT_DEPEN
 
 
 # altitude-dependent-mode endpoints (used when USE_ALT_DEPENDENT_WEIGHTS = TRUE)
-W_AMBIENT_MIN <- 0.10  # diffuse floor: shallow + high sun
-W_AMBIENT_MAX <- 0.80  # diffuse cap:  deep or low sun
+W_AMBIENT_MIN <- 0.15  # diffuse floor: shallow + high sun
+W_AMBIENT_MAX <- 0.5  # diffuse cap:  deep or low sun
 
 W_AMBIENT_P   <- 2     # altitude curve shape
 #   1 = linear in (1-sin α) — ramps up early
@@ -655,11 +760,22 @@ W_AMBIENT_P   <- 2     # altitude curve shape
 # lets diffuse take over at low sun when the direct
 # beam is genuinely a minor share of incoming PAR.
 
-TAU_SCALE     <- 0.8  # optical-depth e-folding (τ at which depth-term = 0.63)
+TAU_SCALE     <- 1.2  # optical-depth e-folding (τ at which depth-term = 0.63)
 ALT_EXP   <- 0.8    # damp altitude — only matters at very low sun
 DEPTH_EXP <- 1.2  # amplify depth — even modest depth pulls ambient up
 
-
+val_strat <- validation %>%
+  mutate(hour = as.integer(format(datetime_pos, "%H")),
+         depth_at_hour = cut(water_depth_m, c(0, 1.5, 2.5, 3.5, 5),
+                             labels=c("<1.5","1.5-2.5","2.5-3.5",">3.5"))) %>%
+  filter(hour %in% 10:14) %>%
+  group_by(sitekey, depth_at_hour) %>%
+  summarise(n = n(),
+            mean_meas = mean(light_mol, na.rm=TRUE),
+            mean_pred = mean(pred_par, na.rm=TRUE),
+            slope_local = if(n() >= 5) coef(lm(pred_par ~ light_mol))[2] else NA,
+            .groups = "drop")
+print(val_strat, n=Inf)
 
 # helper: convert sun altitude (radians) -> W_AMBIENT
 # pmax/sin guards against negative altitudes (sun below horizon); pmin/pmax
@@ -668,6 +784,7 @@ DEPTH_EXP <- 1.2  # amplify depth — even modest depth pulls ambient up
 # Set USE_ALT_DEPENDENT_WEIGHTS=FALSE to zero out the altitude term.
 # Set USE_DEPTH_DEPENDENT_WEIGHTS=FALSE to zero out the depth term.
 # Both off => static W_AMBIENT (handled in process_timestep, not here).
+
 
 w_ambient_combined <- function(sun_alt_rad, water_depth_m, Kd) {
   # If both axes are off, behave like static mode (return W_AMBIENT).
@@ -815,13 +932,13 @@ fit_alt_weights <- function(validation,
 }
 
 if(exists("validation")) {
-alt_fit <- fit_alt_weights(validation)
-alt_fit <- fit_alt_weights(
-  validation,
-  min_grid = seq(0.1, 0.7, by = 0.05),   # below the static 0.7
-  max_grid = seq(0.7, 0.95, by = 0.05),   # at/above the static 0.7
-  p_grid   = c(1, 2, 3)
-)
+  alt_fit <- fit_alt_weights(validation)
+  alt_fit <- fit_alt_weights(
+    validation,
+    min_grid = seq(0.1, 0.7, by = 0.05),   # below the static 0.7
+    max_grid = seq(0.7, 0.95, by = 0.05),   # at/above the static 0.7
+    p_grid   = c(1, 2, 3)
+  )
 }
 
 
@@ -869,7 +986,7 @@ fit_combined_weights <- function(validation,
 }
 
 if(exists("validation")){
-fit_combined <- fit_combined_weights(validation)
+  fit_combined <- fit_combined_weights(validation)
 }
 
 # To apply the recommendation:
@@ -1812,17 +1929,14 @@ wanted <- tibble::tribble(
   "CB", 19L,
   "TB", 19L,
   "TM", 19L,
-  "GT", 19L,
   "HS", 19L,
-  "N3", 19L
+  "N3", 19L,
+  "TB", 18L,
+  "TM", 18L,
+  "CB", 18L,
+  "N3", 18L,
 )
 
-#"HS", 19L,
-#"L1", 19L,
-#"N3", 18L,
-#"RS", 18L,
-#"TB", 18L,
-#"TM", 19L
 
 env_long_test <- env_long %>%
   semi_join(wanted, by = c("site", "year")) %>%
@@ -1901,7 +2015,7 @@ cat(sprintf("  TIMESTEP_INTERVAL        : %s\n", TIMESTEP_INTERVAL))
 cat("══════════════════════════════════════════════════════════════════\n\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LOAD ALL SPATIAL DATA ONCE  →  dem_store
+#  LOAD ALL SPATIAL DATA ONCE  →  dem_store ( I commented it off for now after loading all the dems)
 #  This block runs prepare_dem (which includes ambient_shade — the slow step)
 #  exactly ONCE per site/year. Every subsequent plot pulls from dem_store
 #  instead of recomputing.
@@ -1931,7 +2045,7 @@ for (i in seq_len(nrow(site_years))) {
 # ── OPTIONAL per-site DEM verification (histogram + ambient map), looped ───────
 #  Set to FALSE to skip once you trust the DEMs. Useful when adding new sites
 #  to spot-check that the reef mask & ambient layer look right.
-VERIFY_DEMS <- FALSE
+#VERIFY_DEMS <- FALSE
 if (VERIFY_DEMS) {
   for (key in names(dem_store)) {
     e  <- dem_store[[key]]
@@ -2389,7 +2503,7 @@ plot_shadow_multipanel_one_site <- function(key, output_all, val_all) {
            title = "Bar chart key")
   }
   
-png(file.path(RUNS_DIR, paste0("shadow_multipanel_", key, "_", RUN_TAG, ".png")),
+  png(file.path(RUNS_DIR, paste0("shadow_multipanel_", key, "_", RUN_TAG, ".png")),
       width = n_cols * 800, height = n_rows * 1100 + 200, res = 150)
   draw(); dev.off()
   message("  saved shadow_multipanel_", key, ".png")
@@ -2397,33 +2511,218 @@ png(file.path(RUNS_DIR, paste0("shadow_multipanel_", key, "_", RUN_TAG, ".png"))
 
 for (key in names(dem_store)) plot_shadow_multipanel_one_site(key, output, validation)
 
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  POOLED-PLOT SITE FILTER  (applies to BOTH pooled figures below)
+#  FIG 5 — 3-hour shadow snapshot + zoomed pixel views + full-day PAR line
 #  ──────────────────────────────────────────────────────────────────────────
-#  Default "all" pools every site/year in the run. To show only some, set this
-#  to a vector of sitekeys, e.g.  POOL_SITES <- c("TB18")  or  c("CB18","CB19").
-#  Keys must match the sitekey format ("TB18", "CB19", ...). The per-site PAR
-#  panels and shadow maps above are unaffected — they always loop all sites.
+#  Row 1 (a): three grayscale shadow maps (08, 12, 16h), sensors overlaid
+#  Row 2 (b): three zoomed pixel views of ONE sensor at the same three hours
+#  Row 3 (c): full-day predicted vs measured PAR for that sensor
+#  Grayscale = ready for print; white = lit, dark = shaded.
+#
+#  Tweaks vs original:
+#   - all text sizes bumped up (titles, labels, legend)
+#   - bottom-row (zoom) coordinate axis labels removed (axes = FALSE)
+#   - all sensor points enlarged
+#   - selected zoom sensor made much larger + high-contrast so it stands out
 # ══════════════════════════════════════════════════════════════════════════════
-POOL_SITES <- "all"        # "all"  OR  e.g. c("TB18")  OR  c("CB18","CB19")
 
-# resolve the filter to a concrete set of keys, with a guard for typos
-pool_keys_all <- sort(unique(validation$sitekey))
-pool_keys <- if (identical(POOL_SITES, "all")) pool_keys_all else POOL_SITES
+# ── tunable sizes (edit here) ─────────────────────────────────────────────
+CEX_TITLE     <- 2.4    # main title strip
+CEX_PANEL     <- 2.0    # per-panel titles
+CEX_AXIS_LBL  <- 1.5    # axis label text (row 3)
+CEX_AXIS_TCK  <- 1.25   # axis tick numbers (row 3)
+CEX_LEGEND    <- 1.35   # legend text
+SENSOR_CEX    <- 3    # all sensors on the discs
+SENSOR_LWD    <- 2
+PICK_CEX_DISC <- 4    # selected sensor on the discs
+PICK_CEX_ZOOM <- 3.5    # selected sensor on the zoom panels
+PICK_LWD      <- 3.0
 
-bad_keys <- setdiff(pool_keys, pool_keys_all)
-if (length(bad_keys) > 0)
-  warning("POOL_SITES has keys not present in this run: ",
-          paste(bad_keys, collapse = ", "),
-          " | available: ", paste(pool_keys_all, collapse = ", "))
-pool_keys <- intersect(pool_keys, pool_keys_all)
-if (length(pool_keys) == 0)
-  stop("POOL_SITES matched no site/years in the run. Available: ",
-       paste(pool_keys_all, collapse = ", "))
+plot_shadow_3hr_with_zoom <- function(key, val_all,
+                                      target_hours = c(8, 12, 16),
+                                      zoom_radius_m = 0.30,
+                                      day_pick      = NULL,
+                                      sensor_pick   = NULL,
+                                      seed          = 42) {
+  
+  e          <- dem_store[[key]]
+  dem        <- e$dem
+  hobo_sf    <- e$hobo_sf
+  hobo_wgs84 <- e$hobo_wgs84
+  hobo_utm   <- e$hobo_utm
+  
+  val <- val_all %>% filter(sitekey == key)
+  if (nrow(val) == 0) { message("  (no validation rows for ", key, ")"); return(invisible()) }
+  
+  # ── pick day with the most timesteps ────────────────────────────────────
+  val$date <- as.Date(val$datetime_pos)
+  if (is.null(day_pick)) {
+    day_pick <- as.Date(names(sort(table(val$date), decreasing = TRUE))[1])
+  }
+  vday <- val[val$date == day_pick, ]
+  if (nrow(vday) == 0) stop("no rows for ", key, " on ", day_pick)
+  
+  # ── snap each target hour to the nearest available timestep on this day ─
+  ts_all <- sort(unique(vday$datetime_pos))
+  ts_hrs <- as.integer(format(ts_all, "%H"))
+  ts_use <- as.POSIXct(sapply(target_hours, function(h)
+    ts_all[which.min(abs(ts_hrs - h))]),
+    origin = "1970-01-01", tz = attr(ts_all, "tzone"))
+  
+  # ── pick a random sensor for the zoom (or use provided) ─────────────────
+  sensors <- unique(vday$hoboID_env)
+  if (is.null(sensor_pick)) {
+    set.seed(seed)
+    sensor_pick <- sample(sensors, 1)
+  }
+  message("  zoom sensor: ", sensor_pick)
+  
+  sens_row <- which(hobo_utm$hoboID == sensor_pick)
+  if (length(sens_row) == 0)
+    stop("sensor ", sensor_pick, " not in hobo_utm for ", key)
+  sens_xy <- sf::st_coordinates(hobo_utm[sens_row, ])
+  sens_x  <- sens_xy[1, 1]; sens_y <- sens_xy[1, 2]
+  
+  zoom_ext <- terra::ext(sens_x - zoom_radius_m, sens_x + zoom_radius_m,
+                         sens_y - zoom_radius_m, sens_y + zoom_radius_m)
+  buf_poly <- sf::st_buffer(hobo_utm[sens_row, ], dist = BUFFER_M)
+  maxsearch_px_plot <- max(1, round(MAXSEARCH_M / dem$zscale))
+  
+  vsens <- vday[vday$hoboID_env == sensor_pick, ]
+  vsens$hour <- as.numeric(format(vsens$datetime_pos, "%H")) +
+    as.numeric(format(vsens$datetime_pos, "%M")) / 60
+  vsens <- vsens[order(vsens$hour), ]
+  
+  # ── open device & layout ────────────────────────────────────────────────
+  png(file.path(RUNS_DIR,
+                sprintf("shadow_3hr_zoom_%s_%s_%s.png",
+                        key, sensor_pick, RUN_TAG)),
+      width = 3 * 700, height = 700 + 700 + 620 + 120, res = 140)
+  
+  layout(rbind(c(1, 1, 1),
+               c(2, 3, 4),
+               c(5, 6, 7),
+               c(8, 8, 8)),
+         heights = c(0.35, 3, 3, 2.6))
+  
+  # title strip
+  par(mar = c(0, 0, 0, 0)); plot.new()
+  text(0.5, 0.5,
+       sprintf("%s  |  %s  |  %s  |  zoom sensor %s (buffer %.0f cm)",
+               key, format(day_pick, "%d %b %Y"),
+               kd_method_label(), sensor_pick, BUFFER_M * 100),
+       cex = CEX_TITLE, font = 2)
+  
+  gray_pal <- gray.colors(100, start = 0.1, end = 0.98, rev = FALSE)
+  
+  # helper: draw the selected sensor with a white halo so it pops on any shade
+  draw_pick <- function(cex_pt, lwd_pt) {
+    # white outer ring (halo)
+    plot(vect(hobo_utm[sens_row, ]), add = TRUE,
+         col = "white", bg = NA, cex = cex_pt * 1.35, pch = 23, lwd = lwd_pt * 2.2)
+    # bold coloured diamond
+    plot(vect(hobo_utm[sens_row, ]), add = TRUE,
+         col = "black", bg = "yellow", cex = cex_pt, pch = 23, lwd = lwd_pt)
+  }
+  
+  # ── ROW 1 (a): full shadow maps at 3 hours ──────────────────────────────
+  shadow_stack <- list()
+  for (i in seq_along(ts_use)) {
+    ts      <- ts_use[i]
+    row_env <- vday[vday$datetime_pos == ts, ][1, ]
+    alt_deg <- row_env$sun_altitude * 180 / pi
+    az_deg  <- row_env$sun_azimuth  * 180 / pi
+    
+    shadow_mat <- ray_shade(dem$matrix,
+                            sunaltitude = alt_deg,
+                            sunangle    = az_deg,
+                            zscale      = dem$zscale,
+                            maxsearch   = maxsearch_px_plot)
+    shadow_mat[!dem$reef_mask] <- NA
+    sr <- rast(shadow_mat)
+    ext(sr) <- ext(dem$rast)
+    crs(sr) <- crs(dem$rast)
+    sr <- terra::trim(sr)
+    shadow_stack[[i]] <- sr
+    
+    par(mar = c(1, 1, 4, 1))
+    plot(sr, col = gray_pal, legend = FALSE, axes = FALSE,
+         main = sprintf("%s%s   alt=%.1f\u00b0  az=%.1f\u00b0",
+                        if (i == 1) "a.   " else "",
+                        format(ts, "%H:%M"), alt_deg, az_deg),
+         cex.main = CEX_PANEL)
+    # all sensors overlaid (bigger)
+    plot(vect(hobo_utm), add = TRUE, col = "red", bg = NA,
+         cex = SENSOR_CEX, pch = 16, lwd = SENSOR_LWD)
+    # the zoom sensor highlighted (big, haloed)
+    draw_pick(PICK_CEX_DISC, PICK_LWD)
+  }
+  
+  # ── ROW 2 (b): zoomed pixel views at same hours (NO axis labels) ─────────
+  for (i in seq_along(ts_use)) {
+    ts <- ts_use[i]
+    sr <- shadow_stack[[i]]
+    zoom <- terra::crop(sr, zoom_ext)
+    val_here <- terra::extract(sr, vect(buf_poly), fun = mean, na.rm = TRUE)[1, 2]
+    
+    par(mar = c(1, 1, 4, 1))
+    plot(zoom, col = gray_pal, legend = FALSE, axes = FALSE,   # axes removed
+         main = sprintf("%s%s zoom  |  extracted shadow = %.2f",
+                        if (i == 1) "b.   " else "",
+                        format(ts, "%H:%M"), val_here),
+         cex.main = CEX_PANEL)
+    # faint pixel grid
+    lines(as.polygons(zoom, dissolve = FALSE),
+          col = adjustcolor("black", 0.15), lwd = 0.4)
+    # buffer polygon
+    plot(vect(buf_poly), add = TRUE, border = "dodgerblue",
+         col = adjustcolor("dodgerblue", 0.15), lwd = 2.5)
+    # sensor point (big, haloed)
+    draw_pick(PICK_CEX_ZOOM, PICK_LWD)
+  }
+  
+  # ── ROW 3 (c): full-day predicted vs measured line ──────────────────────
+  par(mar = c(4.5, 4.8, 4, 1), mgp = c(2.9, 0.8, 0))
+  xr   <- range(vsens$hour, na.rm = TRUE)
+  ymax <- max(c(vsens$pred_par, vsens$light_mol), na.rm = TRUE) * 1.05
+  
+  plot(NA, xlim = xr, ylim = c(0, ymax),
+       xlab = "Hour of day (local)",
+       ylab = expression("PAR (\u00b5mol m"^-2*" s"^-1*")"),
+       main = sprintf("c.   %s: predicted vs measured PAR across the day",
+                      sensor_pick),
+       cex.main = CEX_PANEL, cex.lab = CEX_AXIS_LBL, cex.axis = CEX_AXIS_TCK)
+  
+  snap_hours <- as.numeric(format(ts_use, "%H")) +
+    as.numeric(format(ts_use, "%M")) / 60
+  band <- 0.5
+  for (h in snap_hours) {
+    rect(h - band, 0, h + band, ymax,
+         col = adjustcolor("gold", 0.18), border = NA)
+    text(h, ymax * 0.98, sprintf("%02d:00", round(h)),
+         adj = c(0.5, 1), cex = 1.15, col = "grey30")
+  }
+  
+  lines(vsens$hour, vsens$light_mol, col = "steelblue", lwd = 3)
+  points(vsens$hour, vsens$light_mol, col = "steelblue", pch = 16, cex = 1.2)
+  lines(vsens$hour, vsens$pred_par,  col = "firebrick", lwd = 3, lty = 2)
+  points(vsens$hour, vsens$pred_par, col = "firebrick", pch = 16, cex = 1.2)
+  
+  legend("topright", bty = "n", cex = CEX_LEGEND,
+         legend = c("Measured", "Predicted", "Snapshot hours"),
+         col    = c("steelblue", "firebrick", adjustcolor("gold", 0.6)),
+         lty    = c(1, 2, NA),
+         lwd    = c(3, 3, NA),
+         pch    = c(16, 16, 15),
+         pt.cex = c(1.2, 1.2, 2.4))
+  
+  dev.off()
+  message("  saved shadow_3hr_zoom_", key, "_", sensor_pick, "_", RUN_TAG, ".png")
+  invisible(list(day = day_pick, sensor = sensor_pick, timestamps = ts_use))
+}
 
-message("Pooled plots include: ", paste(pool_keys, collapse = ", "))
+# ── run for a chosen site/year ────────────────────────────────────────────
+plot_shadow_3hr_with_zoom("CB19", validation)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2763,14 +3062,29 @@ log_row <- data.frame(
 )
 
 log_path <- file.path(RUNS_ROOT, "metrics_log.csv")
+
+# Guard: if metrics_log.csv has been opened/saved in Excel, its trailing
+# newline gets stripped and write.table(append=TRUE) glues the new row onto
+# the end of the previous row. Check the last byte; if it's not \n, add one.
+ensure_trailing_newline <- function(path) {
+  if (!file.exists(path) || file.info(path)$size == 0) return(invisible())
+  con <- file(path, "rb"); on.exit(close(con))
+  seek(con, where = file.info(path)$size - 1, origin = "start")
+  last_byte <- readBin(con, "raw", n = 1)
+  if (length(last_byte) > 0 && last_byte != as.raw(0x0a)) {
+    close(con); on.exit()
+    cat("\n", file = path, append = TRUE)
+  }
+}
+
 if (file.exists(log_path)) {
+  ensure_trailing_newline(log_path)
   write.table(log_row, log_path, sep = ",", append = TRUE,
               row.names = FALSE, col.names = FALSE)
 } else {
   write.csv(log_row, log_path, row.names = FALSE)
 }
 message("Appended sweep summary to ", log_path)
-
 # ── save per-run validation CSV ───────────────────────────────────────────────
 val_path <- file.path(RUNS_DIR, sprintf("validation_%s.csv", RUN_TAG))
 write.csv(validation, val_path, row.names = FALSE)
@@ -2862,3 +3176,72 @@ fit <- fit_ambient_weights(validation)
 #   W_DIRECT  <- 1 - fit$best_wamb
 #   W_AMBIENT <- fit$best_wamb
 #   # then re-run run_pipeline() to apply the fitted weights
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GT19 RESIDUALS vs SUN AZIMUTH (diagnostic for island-occlusion masking)
+#  GT19 is the only west-side site. If the island blocks the morning sun, the
+#  model — which has no knowledge of the kilometre-scale island — will
+#  OVER-PREDICT during those hours. This plot identifies the compass-bearing
+#  window where over-prediction is concentrated. Use it to set ISLAND_AZ_BLOCK.
+# ══════════════════════════════════════════════════════════════════════════════
+gt_resid <- validation %>%
+  filter(sitekey == "GT19") %>%
+  mutate(
+    residual    = pred_par - light_mol,                     # +ve = over-predict
+    sun_az_deg  = sun_azimuth * 180 / pi,                   # suncalc: from S, +CW
+    sun_compass = (180 + sun_az_deg) %% 360,                # 0=N 90=E 180=S 270=W
+    sun_alt_deg = sun_altitude * 180 / pi
+  )
+
+# 15° bins so a single bad sensor doesn't dominate
+gt_bins <- gt_resid %>%
+  mutate(az_bin = cut(sun_compass, breaks = seq(0, 360, by = 15),
+                      include.lowest = TRUE, right = FALSE)) %>%
+  group_by(az_bin) %>%
+  summarise(az_mid     = mean(sun_compass, na.rm = TRUE),
+            n          = dplyr::n(),
+            med_resid  = median(residual, na.rm = TRUE),
+            mean_meas  = mean(light_mol, na.rm = TRUE),
+            mean_pred  = mean(pred_par,  na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(az_mid)
+
+cat("\n── GT19 residuals binned by sun compass bearing ──\n")
+print(as.data.frame(gt_bins), row.names = FALSE, digits = 3)
+
+png(file.path(RUNS_DIR, sprintf("gt19_resid_vs_azimuth_%s.png", RUN_TAG)),
+    width = 11 * 130, height = 6 * 130, res = 130)
+par(mar = c(5, 5, 4, 2), mfrow = c(1, 2))
+
+# (a) scatter of every hourly residual + binned median line
+plot(gt_resid$sun_compass, gt_resid$residual,
+     pch = 19, col = adjustcolor("steelblue", 0.35), cex = 0.6,
+     xlim = c(0, 360),
+     xlab = "Sun compass bearing (° — 0=N, 90=E, 180=S, 270=W)",
+     ylab = "Residual: pred − meas (umol)",
+     main = "GT19: per-hour residuals vs sun azimuth")
+abline(h = 0, lty = 2, col = "red", lwd = 1.5)
+lines(gt_bins$az_mid, gt_bins$med_resid, col = "black", lwd = 2)
+points(gt_bins$az_mid, gt_bins$med_resid, pch = 19, cex = 1.2)
+# candidate mask window — adjust after you eyeball the binned line
+abline(v = c(60, 180), lty = 3, col = "darkorange", lwd = 2)
+legend("topright", bty = "n", cex = 0.85,
+       legend = c("hourly residual", "binned median",
+                  "candidate block (60–180°)"),
+       col = c("steelblue", "black", "darkorange"),
+       pch = c(19, 19, NA), lty = c(NA, 1, 3), lwd = c(NA, 2, 2))
+
+# (b) mean measured vs predicted, by azimuth bin — shows WHERE the model lies
+plot(gt_bins$az_mid, gt_bins$mean_meas, type = "b", pch = 19, col = "blue",
+     ylim = range(c(gt_bins$mean_meas, gt_bins$mean_pred), na.rm = TRUE),
+     xlim = c(0, 360),
+     xlab = "Sun compass bearing (°)",
+     ylab = "Mean PAR (umol)",
+     main = "GT19: mean PAR by sun azimuth")
+lines(gt_bins$az_mid, gt_bins$mean_pred, type = "b", pch = 19, col = "red")
+abline(v = c(60, 180), lty = 3, col = "darkorange", lwd = 2)
+legend("topright", bty = "n", legend = c("Measured", "Predicted"),
+       col = c("blue", "red"), pch = 19, lty = 1)
+dev.off()
+message("Saved gt19_resid_vs_azimuth_", RUN_TAG, ".png")
+
