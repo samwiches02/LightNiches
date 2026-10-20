@@ -1,0 +1,10 @@
+output/
+data/
+.Rhistory
+.RData
+.Rproj.user/
+output_test/
+_to_delete/
+_backup_*/
+*.bak_pre_*
+.DS_Store
