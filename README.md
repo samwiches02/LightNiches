@@ -40,6 +40,33 @@ where it stopped (`FORCE_RAYTRACE <- TRUE` in `config.R` redoes them).
 Each stage writes `output/manifest_<stage>.txt` with the run time, git commit,
 every setting in `config.R`, and the R session.
 
+### Run log, dated copies and sensitivity runs
+
+- `output/run_log.csv` gets one row per stage run: time, run id, label, output
+  folder, git commit (and whether there were uncommitted changes), ambient
+  weight, Kd constant, buffer, number of events, and for stage 03 the headline
+  metrics. Never overwritten.
+- `output/logs/` keeps a dated copy of every stage manifest and, for every
+  stage 03 run, `validation_<run id>_<label>.csv`: one row per logger-hour with
+  every model's prediction and the inputs behind it.
+- Every figure from stage 04 has a small grey footer: label | run id | commit
+  (`*` = uncommitted changes).
+- Sensitivity runs never touch `output/`'s main results:
+
+```sh
+Rscript run_all.R 03 07 W_AMBIENT_FIXED=0.7          # -> output/runs/w_ambient_0.7/
+Rscript run_all.R 03 07 W_AMBIENT_FIXED=0.7 RUN_LABEL=my_name
+```
+
+  A labelled run reads the stage 01/02 products from `output/` and writes its
+  own predictions, metrics and figures to `output/runs/<label>/`.
+
+### Figures folder
+
+`output/figures/` holds the paper figures; `timeseries/` (S1, one per event),
+`residuals_by_event/` (S7), and `logger_check/` (from `scripts/08_logger_check.R`)
+are subfolders. `scripts/09_logger_explorer.R` is the interactive version.
+
 ## Where things are
 
 ```

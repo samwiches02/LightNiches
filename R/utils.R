@@ -29,6 +29,17 @@ out_path <- function(...) {
   p
 }
 
+# [NEW] Read a file: from this run's folder if it is there, otherwise from
+# BASE_OUT_DIR (the main output/). Lets a labelled sensitivity run reuse the
+# stage 01/02 products without copying them. In the main run both are output/.
+in_path <- function(...) {
+  p <- file.path(OUT_DIR, ...)
+  if (file.exists(p)) return(p)
+  b <- file.path(BASE_OUT_DIR, ...)
+  if (file.exists(b)) return(b)
+  out_path(...)
+}
+
 git_hash <- function() {
   h <- tryCatch(suppressWarnings(system("git rev-parse --short HEAD", intern = TRUE,
                        ignore.stderr = TRUE)), error = function(e) character())
@@ -67,7 +78,42 @@ write_manifest <- function(stage, extra = NULL) {
   if (!is.null(extra)) { cat("\nNOTES\n"); cat(paste0("  ", extra, "\n"), sep = "") }
   cat("\nSESSION\n")
   print(sessionInfo())
+  sink()
+  on.exit()
+  log_run(stage, path, headline = attr(extra, "headline"))
   invisible(path)
+}
+
+# [NEW] Claude, 22 Oct 2026 — like your metrics_log.csv
+#  Every stage run appends one row to output/run_log.csv (one log for every
+#  run label), and a dated copy of the stage manifest goes to output/logs/.
+#  headline: optional named vector of key results (03 passes its metrics).
+log_run <- function(stage, manifest, headline = NULL) {
+  logs <- file.path(BASE_OUT_DIR, "logs")
+  dir.create(logs, showWarnings = FALSE, recursive = TRUE)
+  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  copy  <- file.path(logs, sprintf("%s_%s_%s.txt", stamp, RUN_LABEL, sub("^manifest_", "", stage)))
+  file.copy(manifest, copy, overwrite = TRUE)
+  row <- data.frame(
+    time            = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    run_id          = RUN_ID,
+    stage           = stage,
+    run_label       = RUN_LABEL,
+    output_folder   = sub(paste0("^", here::here(), "/?"), "", OUT_DIR),
+    git_commit      = git_hash(),
+    uncommitted     = git_dirty(),
+    w_ambient       = if (is.finite(W_AMBIENT_FIXED)) as.character(W_AMBIENT_FIXED) else "CV",
+    kd_constant     = KD_CONSTANT,
+    buffer_m        = BUFFER_M,
+    n_events        = length(SITES),
+    test_run        = TEST_RUN,
+    headline        = if (is.null(headline)) "" else
+                        paste(names(headline), headline, sep = "=", collapse = "; "),
+    manifest        = sub(paste0("^", here::here(), "/?"), "", copy))
+  f <- file.path(BASE_OUT_DIR, "run_log.csv")
+  utils::write.table(row, f, sep = ",", row.names = FALSE, qmethod = "double",
+                     append = file.exists(f), col.names = !file.exists(f))
+  invisible(row)
 }
 
 stage_banner <- function(txt) {

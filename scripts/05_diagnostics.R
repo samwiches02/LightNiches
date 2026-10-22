@@ -31,8 +31,8 @@ stage_banner("05  REGISTRATION DIAGNOSTICS")
 init_geometry_checks()
 set.seed(SEED)
 
-cache <- readRDS(out_path("cache.rds"))
-geom  <- readRDS(out_path("geom.rds"))
+cache <- readRDS(in_path("cache.rds"))
+geom  <- readRDS(in_path("geom.rds"))
 
 # ── Measured per-logger offset: mean log brightness relative to the site-hour mean
 offsets <- cache %>%
@@ -67,7 +67,7 @@ scor <- function(a, b) suppressWarnings(stats::cor(a, b, method = "spearman",
 # ── Per site ─────────────────────────────────────────────────────────────────
 summary_rows <- list()
 for (key in SITES) {
-  f <- out_path("dems", paste0(key, ".rds"))
+  f <- in_path("dems", paste0(key, ".rds"))
   if (!file.exists(f)) { message(key, ": no saved DEM, skipping"); next }
   message("\n── ", key, " ──")
   dem <- load_dem(f)
@@ -135,7 +135,7 @@ res <- bind_rows(summary_rows)
 message("\n\nPART B: DEM elevation vs dpHB, and relief vs measured offsets (no rayshader)")
 partB <- list()
 for (key in SITES) {
-  f <- out_path("dems", paste0(key, ".rds")); if (!file.exists(f)) next
+  f <- in_path("dems", paste0(key, ".rds")); if (!file.exists(f)) next
   dem <- load_dem(f)
   zr  <- dem$rast
   inside <- terra::values(matrix_to_rast(dem$reef_mask * 1, dem$rast))[, 1] > 0.5

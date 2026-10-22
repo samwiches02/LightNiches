@@ -24,6 +24,10 @@ source(here::here("R", "functions_raytrace.R"))
 suppressPackageStartupMessages({ library(dplyr) })
 
 stage_banner("02  RAY-TRACING")
+if (RUN_LABEL != "main")   # [NEW] labelled runs reuse output/'s stage 01/02 products
+  stop("Stage 02 only runs for the main analysis (RUN_LABEL is '", RUN_LABEL, "'). ",
+       "Run a labelled run from stage 03:  Rscript run_all.R 03 07 ...", call. = FALSE)
+
 
 # [NEW] Measure how ray_shade's sunangle maps onto compass bearings on our
 #   grids, check it at four more angles, and stop if it doesn't hold. Every

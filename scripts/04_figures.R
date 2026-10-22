@@ -11,8 +11,13 @@
 #    Fig 5  within-hour anomalies, measured vs predicted, by event
 #    Fig 6  error vs number of reference loggers, open vs random
 #    Fig 7  residuals vs hour, depth and shadow fraction
-#    S1     per-logger time series per event
+#    S1     per-logger time series per event   -> figures/timeseries/
 #    S6     daytime-integrated PAR, measured vs predicted
+#    Fig 8  hourly PAR: constant Kd 0.2 vs reference-logger Kd (both shaded)
+#    Fig 9  daytime-integrated PAR: the same comparison
+#    S7     residuals by event vs hour, depth and direct-light fraction
+#                                               -> figures/residuals_by_event/
+#  Single-logger shadow checks: scripts/08_logger_check.R (run on demand)
 #
 #  PROVENANCE TAGS:  [YOURS] your code from master_script.R, logic unchanged
 #                    [YOURS, EDITED] your code with listed changes   [NEW] Claude
@@ -27,8 +32,23 @@ suppressPackageStartupMessages({ library(dplyr) })
 
 stage_banner("04  FIGURES")
 init_geometry_checks()   # [NEW] same orientation checks and sun calibration as stage 02
+# [Claude, 22 Oct 2026] `name` may include a subfolder ("timeseries/S1_..."), and
+#   every figure gets a small grey footer: run label | run id | git commit
+#   (* = uncommitted changes), so a PNG always says which run drew it.
+FIG_STAMP <- sprintf("%s | run %s | commit %s%s", RUN_LABEL, RUN_ID, git_hash(),
+                     if (git_dirty()) "*" else "")
+.fig_open <- FALSE
 fig <- function(name, w = 8, h = 6) {
   png(out_path("figures", paste0(name, ".png")), width = w, height = h, units = "in", res = 200)
+  .fig_open <<- TRUE
+}
+dev.off <- function(which = grDevices::dev.cur()) {
+  if (.fig_open) {
+    graphics::mtext(FIG_STAMP, side = 1, line = -1.1, outer = TRUE, adj = 0.995,
+                    cex = 0.55, col = "grey55")
+    .fig_open <<- FALSE
+  }
+  grDevices::dev.off(which)
 }
 UNIT_HOURLY <- expression("PAR (" * mu * "mol photons m"^-2 * " s"^-1 * ")")
 
@@ -43,9 +63,9 @@ UNIT_HOURLY <- expression("PAR (" * mu * "mol photons m"^-2 * " s"^-1 * ")")
 #  Grayscale = ready for print; white = lit, dark = shaded.
 #  Needs only 02 outputs, so it can be drawn before the models are run.
 local({
-  dem   <- load_dem(out_path("dems", paste0(FIG_SITE, ".rds")))
-  hobo  <- load_hobo_locations(readRDS(out_path("geom.rds")), FIG_SITE)
-  cache <- readRDS(out_path("cache.rds"))
+  dem   <- load_dem(in_path("dems", paste0(FIG_SITE, ".rds")))
+  hobo  <- load_hobo_locations(readRDS(in_path("geom.rds")), FIG_SITE)
+  cache <- readRDS(in_path("cache.rds"))
   ts    <- sort(unique(cache$datetime_pos[cache$sitekey == FIG_SITE]))
   day   <- names(sort(table(as.Date(ts, tz = LOCAL_TZ)), decreasing = TRUE))[1]
   ts    <- ts[as.Date(ts, tz = LOCAL_TZ) == as.Date(day)]
@@ -71,14 +91,14 @@ local({
   dev.off()
 })
 
-if (!file.exists(out_path("predictions.rds"))) {
+if (!file.exists(in_path("predictions.rds"))) {
   end_stage("No predictions yet (03 not finished); only Fig 3 drawn.", 0L)
 }
 
-preds <- readRDS(out_path("predictions.rds"))
-cache <- readRDS(out_path("cache.rds"))
-boot  <- read.csv(out_path("metrics_bootstrap_ci.csv"), stringsAsFactors = FALSE)
-refn  <- read.csv(out_path("ref_number.csv"), stringsAsFactors = FALSE)
+preds <- readRDS(in_path("predictions.rds"))
+cache <- readRDS(in_path("cache.rds"))
+boot  <- read.csv(in_path("metrics_bootstrap_ci.csv"), stringsAsFactors = FALSE)
+refn  <- read.csv(in_path("ref_number.csv"), stringsAsFactors = FALSE)
 main  <- preds %>% filter(model == FIG_MAIN_MODEL) %>%
   left_join(cache %>% select(sitekey, hoboID_env, datetime_pos, shadow_refr),
             by = c("sitekey", "hoboID_env", "datetime_pos"))
@@ -96,7 +116,7 @@ local({
     d <- b[b$metric == met, ]; d <- d[match(rev(ladder), d$model), ]
     y <- seq_len(nrow(d))
     plot(d$mid, y, xlim = range(c(d$lo, d$hi, 0)), yaxt = "n", pch = 19,
-         xlab = if (met == "rmse") "Hourly RMSE" else "Mean bias (pred − meas)", ylab = "",
+         xlab = if (met == "rmse") "Hourly RMSE" else "Mean bias (pred - meas)", ylab = "",
          main = toupper(met))
     segments(d$lo, y, d$hi, y, lwd = 2)
     axis(2, at = y, labels = d$model, las = 1)
@@ -113,8 +133,8 @@ local({
   fig("fig5_within_site_anomalies", w = 7, h = 7)
   lim <- range(c(a$d_obs, a$d_pred))
   plot(a$d_obs, a$d_pred, pch = 16, cex = 0.5, col = adjustcolor(ev_col[a$sitekey], 0.5),
-       xlim = lim, ylim = lim, xlab = "Measured − site-hour mean",
-       ylab = "Predicted − site-hour mean",
+       xlim = lim, ylim = lim, xlab = "Measured - site-hour mean",
+       ylab = "Predicted - site-hour mean",
        main = sprintf("%s: logger-to-logger differences (within-site R² = %.2f)",
                       FIG_MAIN_MODEL, within_r2(main)))
   abline(0, 1, lty = 2); abline(h = 0, v = 0, col = "grey80")
@@ -152,12 +172,12 @@ local({
   main$hour <- as.integer(format(main$datetime_pos, "%H"))
   fig("fig7_residuals", w = 12, h = 4.5)
   par(mfrow = c(1, 3), mar = c(4.5, 4.5, 2, 1))
-  boxplot(res ~ hour, data = main, xlab = "Hour (local)", ylab = "Residual (pred − meas)",
+  boxplot(res ~ hour, data = main, xlab = "Hour (local)", ylab = "Residual (pred - meas)",
           outline = FALSE, col = "grey90"); abline(h = 0, lty = 2, col = "red")
   for (v in c("water_depth_m", "shadow_refr")) {
     plot(main[[v]], main$res, pch = 16, cex = 0.4, col = adjustcolor(ev_col[main$sitekey], 0.4),
          xlab = if (v == "water_depth_m") "Water depth (m)" else "Direct-light fraction",
-         ylab = "Residual (pred − meas)")
+         ylab = "Residual (pred - meas)")
     abline(h = 0, lty = 2, col = "red")
     ok <- is.finite(main[[v]]); lines(stats::lowess(main[[v]][ok], main$res[ok]), lwd = 2)
   }
@@ -174,7 +194,7 @@ local({
 for (k in events) {
   d <- main[main$sitekey == k, ]
   ids <- sort(unique(d$hoboID_env)); nc <- 5; nr <- ceiling(length(ids) / nc)
-  fig(paste0("S1_timeseries_", k), w = 2.4 * nc, h = 2 * nr + 0.6)
+  fig(paste0("timeseries/S1_timeseries_", k), w = 2.4 * nc, h = 2 * nr + 0.6)
   par(mfrow = c(nr, nc), mar = c(2, 2, 1.5, 0.5), oma = c(0, 0, 2, 0))
   yl <- range(c(d$pred, d$light_mol))
   for (id in ids) {
@@ -202,6 +222,192 @@ local({
   abline(0, 1, lty = 2)
   legend("topleft", legend = events, col = ev_col, pch = 19, bty = "n", cex = 0.8)
   dev.off()
+})
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Constant Kd (0.2) vs reference-logger Kd, all events pooled
+#  [NEW] Claude, 22 Oct 2026
+#
+#  The two models differ ONLY in Kd:
+#    "Kd 0.2 + shading" = M1 (constant Kd, KD_CONSTANT) × the same shading term
+#                         as M4r, using M4r's own cross-validated ambient weight
+#                         for each event (w_fold). No new fitting.
+#    M4r                = reference-logger hourly Kd + the same shading.
+#  The constant-Kd-with-shading curve is a figure-only comparison, not a model
+#  in the pre-registered ladder; label it that way if it goes in the paper.
+#    fig8   hourly PAR, measured vs predicted, coloured by hour
+#    fig9   daytime-integrated PAR, shape = event, colour = depth
+#    S7     residuals by event: vs hour, depth, direct-light fraction
+# ══════════════════════════════════════════════════════════════════════════════
+cmp <- local({
+  m1  <- preds %>% filter(model == "M1") %>%
+    select(sitekey, hoboID_env, datetime_pos, pred_m1 = pred)
+  m4  <- preds %>% filter(model == FIG_MAIN_MODEL) %>%
+    select(sitekey, hoboID_env, datetime_pos, light_mol, water_depth_m,
+           pred_ref = pred, w_fold)
+  out <- m4 %>%
+    inner_join(m1, by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
+    left_join(cache %>% select(sitekey, hoboID_env, datetime_pos, shadow_refr, ambient),
+              by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
+    mutate(pred_const = pred_m1 * ((1 - w_fold) * shadow_refr + w_fold * ambient),
+           hour       = as.integer(format(datetime_pos, "%H")))
+  stopifnot(nrow(out) == nrow(m4), all(is.finite(out$pred_const)))
+  out
+})
+CMP_MODELS <- c(pred_const = sprintf("Constant Kd = %.1f + shading", KD_CONSTANT),
+                pred_ref   = sprintf("Reference-logger Kd + shading (%s)", FIG_MAIN_MODEL))
+stat_box <- function(obs, pred, extra = NULL) {
+  m <- metrics(obs, pred)
+  legend("topleft", bty = "n", cex = 0.9, legend = c(
+    sprintf("n = %d", m$n), sprintf("RMSE = %.0f", m$rmse),
+    sprintf("bias = %+.0f", m$bias), sprintf("R² = %.2f", m$r2), extra))
+}
+fmt_stat_box <- function(obs, pred, digits = 2) {   # DLI version: more decimals
+  m <- metrics(obs, pred); f <- stats::coef(stats::lm(obs ~ pred))
+  legend("topleft", bty = "n", cex = 0.9, legend = c(
+    sprintf("n = %d", m$n), sprintf("RMSE = %.*f", digits, m$rmse),
+    sprintf("bias = %+.*f", digits, m$bias), sprintf("R² = %.2f", m$r2),
+    sprintf("fit: y = %.2f + %.2fx", f[1], f[2])))
+}
+
+# ── Fig 8: hourly PAR, measured vs predicted ─────────────────────────────────
+local({
+  hrs   <- sort(unique(cmp$hour))
+  hcol  <- setNames(colorRampPalette(c("#3B0F0A", "#C8553D", "#F4C9B8",
+                                       "#C8553D", "#3B0F0A"))(length(hrs)), hrs)
+  show  <- intersect(c(8, 12, 16), hrs)
+  lim   <- c(0, max(c(cmp$light_mol, cmp$pred_const, cmp$pred_ref)))
+  fig("fig8_hourly_constKd_vs_refKd", w = 12, h = 6)
+  layout(matrix(c(1, 2, 3), 1), widths = c(1, 1, 0.18))
+  par(mar = c(4.5, 4.8, 3, 1))
+  for (p in names(CMP_MODELS)) {
+    x <- cmp[[p]]; y <- cmp$light_mol
+    plot(x, y, pch = 16, cex = 0.45, col = adjustcolor(hcol[as.character(cmp$hour)], 0.7),
+         xlim = lim, ylim = lim, xlab = expression("Predicted PAR (" * mu * "mol m"^-2 * " s"^-1 * ")"),
+         ylab = expression("Measured PAR (" * mu * "mol m"^-2 * " s"^-1 * ")"),
+         main = CMP_MODELS[[p]], cex.main = 1)
+    abline(0, 1, lty = 3, col = "grey40")
+    sl <- vapply(show, function(h) { i <- cmp$hour == h; sum(x[i] * y[i]) / sum(x[i]^2) }, 0)
+    for (j in seq_along(show)) {
+      i <- cmp$hour == show[j]
+      segments(0, 0, max(x[i]), sl[j] * max(x[i]), col = hcol[as.character(show[j])], lwd = 3)
+    }
+    stat_box(y, x, sprintf("within-site R² = %.3f",
+                           within_r2(transform(cmp, pred = cmp[[p]]))))
+    legend("bottomright", bty = "n", cex = 0.85, lty = c(3, rep(1, length(show))),
+           lwd = c(1, rep(3, length(show))), col = c("grey40", hcol[as.character(show)]),
+           legend = c("1:1", sprintf("%02d:00 slope = %.2f", show, sl)))
+  }
+  par(mar = c(6, 0.5, 6, 3))
+  image(1, seq_along(hrs), t(seq_along(hrs)), col = hcol, axes = FALSE, xlab = "", ylab = "")
+  axis(4, at = seq_along(hrs), labels = sprintf("%02d:00", hrs), las = 1, cex.axis = 0.8)
+  mtext("Hour", side = 3, line = 0.5, cex = 0.8)
+  dev.off()
+})
+
+# ── Fig 9: daytime-integrated PAR ────────────────────────────────────────────
+local({
+  di <- lapply(names(CMP_MODELS), function(p) daytime_integrated(cmp, p))
+  names(di) <- names(CMP_MODELS)
+  ev_pch <- setNames(rep_len(c(0:14, 15:18), length(events)), events)
+  dr     <- range(di[[1]]$depth)
+  dcol   <- function(z) colorRampPalette(c("#FBD1B0", "#E8743B", "#2B0F06"))(100)[
+                          1 + round(99 * (z - dr[1]) / diff(dr))]
+  lim <- c(0, max(unlist(lapply(di, function(d) c(d$obs, d$pred)))))
+  fig("fig9_DLI_constKd_vs_refKd", w = 12, h = 6)
+  layout(matrix(c(1, 2, 3), 1), widths = c(1, 1, 0.42))
+  par(mar = c(4.5, 4.8, 3, 1))
+  for (p in names(CMP_MODELS)) {
+    d <- di[[p]]
+    plot(d$pred, d$obs, pch = ev_pch[d$sitekey], col = dcol(d$depth), lwd = 1.3,
+         xlim = lim, ylim = lim, main = CMP_MODELS[[p]], cex.main = 1,
+         xlab = expression("Predicted daytime-integrated PAR (mol m"^-2 * " d"^-1 * ")"),
+         ylab = expression("Measured daytime-integrated PAR (mol m"^-2 * " d"^-1 * ")"))
+    abline(0, 1, lty = 2, col = "red", lwd = 1.5)
+    abline(stats::lm(obs ~ pred, data = d), lwd = 2.5)
+    fmt_stat_box(d$obs, d$pred)
+  }
+  par(mar = c(4, 0, 3, 0)); plot.new()
+  legend("topleft", legend = events, pch = ev_pch, bty = "n", cex = 0.85,
+         title = "Event", ncol = 2)
+  zz <- seq(dr[1], dr[2], length.out = 6)
+  legend("bottomleft", legend = sprintf("%.1f m", zz), pch = 15, col = dcol(zz),
+         bty = "n", cex = 0.85, title = "Mean water depth")
+  dev.off()
+})
+
+# ── S7: residual breakdown by event (pred - meas) ────────────────────────────
+#  Points and boxes = reference-logger model; red line = its loess with 95%
+#  band; grey dashed = constant-Kd model's loess. Open circles = binned means
+#  ± SD (8 equal-count bins). Four events per page.
+local({
+  smooth_band <- function(x, y) {
+    ok <- is.finite(x) & is.finite(y)
+    if (sum(ok) < 20 || length(unique(x[ok])) < 6) return(NULL)
+    dd  <- data.frame(x = x[ok], y = y[ok])
+    fit <- tryCatch(suppressWarnings(stats::loess(y ~ x, data = dd, span = 0.75)),
+                    error = function(e) NULL)
+    if (is.null(fit)) return(NULL)
+    g <- seq(min(dd$x), max(dd$x), length.out = 80)
+    p <- tryCatch(suppressWarnings(stats::predict(fit, data.frame(x = g), se = TRUE)),
+                  error = function(e) NULL)
+    if (is.null(p) || all(!is.finite(p$fit))) return(NULL)
+    data.frame(x = g, fit = p$fit, lo = p$fit - 1.96 * p$se.fit, hi = p$fit + 1.96 * p$se.fit)
+  }
+  bin_means <- function(x, y, n = 8) {
+    br <- unique(stats::quantile(x, seq(0, 1, length.out = n + 1), na.rm = TRUE))
+    if (length(br) < 3) return(NULL)
+    b <- cut(x, br, include.lowest = TRUE)
+    data.frame(x = tapply(x, b, mean), m = tapply(y, b, mean), s = tapply(y, b, stats::sd))
+  }
+  cmp$res_ref   <- cmp$pred_ref - cmp$light_mol
+  cmp$res_const <- cmp$pred_const - cmp$light_mol
+  ylim <- stats::quantile(c(cmp$res_ref, cmp$res_const), c(0.005, 0.995))
+  pages <- split(events, ceiling(seq_along(events) / 4))
+  for (pg in seq_along(pages)) {
+    fig(sprintf("residuals_by_event/S7_residuals_by_event_p%d", pg), w = 13, h = 3.4 * length(pages[[pg]]) + 0.8)
+    par(mfrow = c(length(pages[[pg]]), 3), mar = c(4.2, 4.5, 3.2, 1), oma = c(0, 0, 3, 0))
+    for (k in pages[[pg]]) {
+      d  <- cmp[cmp$sitekey == k, ]
+      bx <- sprintf("bias: ref %+.0f | const %+.0f  (n=%d)",
+                    mean(d$res_ref), mean(d$res_const), nrow(d))
+      boxplot(res_ref ~ hour, data = d, outline = FALSE, col = "#EAD9D5", border = "#7A5C55",
+              ylim = ylim, xlab = "Hour of day", ylab = "Residual (pred - meas)")
+      title(paste0(k, ": residual vs hour"), line = 1.4)
+      med_c <- tapply(d$res_const, d$hour, stats::median)
+      points(seq_along(med_c), med_c, pch = 4, col = "grey35", lwd = 2)
+      abline(h = 0, lty = 2, col = "red"); mtext(bx, side = 3, line = 0.2, cex = 0.6)
+      for (v in c("water_depth_m", "shadow_refr")) {
+        plot(d[[v]], d$res_ref, pch = 16, cex = 0.4, col = adjustcolor("grey30", 0.35),
+             ylim = ylim, ylab = "Residual (pred - meas)",
+             xlab = if (v == "water_depth_m") "Water depth (m)" else
+                      "Direct-light fraction (0 = shaded, 1 = lit)",
+             main = "")
+        title(paste0(k, ": residual vs ", if (v == "water_depth_m") "depth" else
+                                            "direct-light fraction"), line = 1.4)
+        abline(h = 0, lty = 2, col = "red")
+        s <- smooth_band(d[[v]], d$res_ref)
+        if (!is.null(s)) {
+          polygon(c(s$x, rev(s$x)), c(s$lo, rev(s$hi)), col = adjustcolor("#C8372D", 0.2),
+                  border = NA)
+          lines(s$x, s$fit, col = "#C8372D", lwd = 2.5)
+        }
+        sc <- smooth_band(d[[v]], d$res_const)
+        if (!is.null(sc)) lines(sc$x, sc$fit, col = "grey35", lwd = 2, lty = 2)
+        b <- bin_means(d[[v]], d$res_ref)
+        if (!is.null(b)) {
+          segments(b$x, b$m - b$s, b$x, b$m + b$s, col = "grey20")
+          points(b$x, b$m, pch = 21, bg = "white", cex = 1.2, lwd = 1.5)
+        }
+        mtext(bx, side = 3, line = 0.2, cex = 0.6)
+      }
+    }
+    mtext(sprintf(paste("Residuals by event (%d of %d). Red = reference-logger Kd (%s),",
+                        "grey dashed / x = constant Kd %.1f"),
+                  pg, length(pages), FIG_MAIN_MODEL, KD_CONSTANT),
+          outer = TRUE, line = 1, font = 2)
+    dev.off()
+  }
 })
 
 write_manifest("04_figures")

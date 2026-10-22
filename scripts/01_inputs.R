@@ -24,6 +24,10 @@ source(here::here("R", "functions_inputs.R"))
 suppressPackageStartupMessages({ library(dplyr); library(lubridate) })
 
 stage_banner("01  INPUTS")
+if (RUN_LABEL != "main")   # [NEW] labelled runs reuse output/'s stage 01/02 products
+  stop("Stage 01 only runs for the main analysis (RUN_LABEL is '", RUN_LABEL, "'). ",
+       "Run a labelled run from stage 03:  Rscript run_all.R 03 07 ...", call. = FALSE)
+
 
 # ── Tides and the capture-tide correction ────────────────────────────────────
 # [YOURS] — your "Fitting harmonic tide models" and capture-tide lookup steps

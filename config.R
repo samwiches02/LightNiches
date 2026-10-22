@@ -255,3 +255,32 @@ if (TEST_RUN) {
   REF_N_DRAW <- 20                       # fewer logger-number draws
   REF_KS <- c(1, 2, 3)
 }
+
+
+# ── Run labels and sensitivity runs ───────────────────────────────────────────
+# [NEW] Claude, 22 Oct 2026
+#  RUN_LABEL "main" = the pre-registered analysis, written to output/.
+#  Any other label writes stages 03, 04 and 07 to output/runs/<label>/ and
+#  READS the stage 01/02 products (cache, DEMs, reference pool, eval rows) from
+#  output/, so nothing in output/ is overwritten. Stages 01/02 refuse to run
+#  under a label.
+#  W_AMBIENT_FIXED: NA = ambient weight chosen by leave-one-event-out CV (as
+#  pre-registered). A number fixes it for every event (exploratory). Setting it
+#  without a label gives the label "w_ambient_<value>" automatically.
+#  Both can be set for one run from the command line, without editing this file:
+#     Rscript run_all.R 03 07 W_AMBIENT_FIXED=0.7
+RUN_LABEL       <- "main"
+W_AMBIENT_FIXED <- NA
+
+for (.nm in c("RUN_LABEL", "W_AMBIENT_FIXED")) {          # command-line overrides
+  .v <- Sys.getenv(paste0("LN_", .nm), "")
+  if (nzchar(.v)) assign(.nm, utils::type.convert(.v, as.is = TRUE))
+}
+rm(list = intersect(c(".nm", ".v"), ls(all.names = TRUE)))
+if (is.finite(W_AMBIENT_FIXED)) {
+  if (RUN_LABEL == "main") RUN_LABEL <- paste0("w_ambient_", W_AMBIENT_FIXED)
+  W_GRID <- W_AMBIENT_FIXED
+}
+BASE_OUT_DIR <- OUT_DIR                                     # stage 01/02 products live here
+if (RUN_LABEL != "main") OUT_DIR <- file.path(BASE_OUT_DIR, "runs", RUN_LABEL)
+RUN_ID <- Sys.getenv("LN_RUN_ID", format(Sys.time(), "%Y%m%d_%H%M%S"))  # shared by one run_all.R call

@@ -32,9 +32,9 @@ stage_banner(sprintf("06  DAY ANIMATION  (%s, every %g min)", SITE, STEP))
 # here must match stage 02's (e.g. "using 'transpose'", "s = +1, offset = 0°").
 init_geometry_checks()
 
-dem   <- load_dem(out_path("dems", paste0(SITE, ".rds")))
-hobo  <- load_hobo_locations(readRDS(out_path("geom.rds")), SITE)
-cache <- readRDS(out_path("cache.rds"))
+dem   <- load_dem(in_path("dems", paste0(SITE, ".rds")))
+hobo  <- load_hobo_locations(readRDS(in_path("geom.rds")), SITE)
+cache <- readRDS(in_path("cache.rds"))
 cen   <- get_site_centroid(dem$rast)
 
 # the day with the most logger-hours at this site

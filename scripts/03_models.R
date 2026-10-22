@@ -28,8 +28,11 @@ source(here::here("R", "functions_models.R"))
 suppressPackageStartupMessages({ library(dplyr); library(tidyr) })
 
 stage_banner("03  MODELS")
+message("Run label: ", RUN_LABEL, "   output folder: ", OUT_DIR,
+        "\nAmbient weight: ", if (is.finite(W_AMBIENT_FIXED))
+          paste("FIXED at", W_AMBIENT_FIXED, "(exploratory)") else "leave-one-event-out CV")
 
-cache <- readRDS(out_path("cache.rds"))
+cache <- readRDS(in_path("cache.rds"))
 cache$T_surf <- if (USE_FRESNEL) fresnel_T(cache$sun_altitude) else 1
 
 message("Excluded sampling events and reasons:")
@@ -38,7 +41,7 @@ print(EXCLUDED_EVENTS)
 # ── 1. Reference pool (geometry only, frozen) ────────────────────────────────
 # [NEW] replaces your BOOTSTRAP WORKFLOW (run with satellite Kd, paste the
 #   finder's output into REFERENCE_LOGGER, re-run)
-pool_file <- out_path("reference_pool.csv")
+pool_file <- in_path("reference_pool.csv")
 if (!file.exists(pool_file)) {
   pool <- select_reference_pool(cache)
   write.csv(pool, pool_file, row.names = FALSE)
@@ -80,7 +83,7 @@ eval_d <- cache %>%
   anti_join(pool, by = c("sitekey", "hoboID_env")) %>%
   filter(if_all(all_of(needed), is.finite), water_depth_m > 0)
 
-keys_file <- out_path("eval_keys.csv")
+keys_file <- in_path("eval_keys.csv")
 eval_keys <- eval_d %>% distinct(sitekey, hoboID_env, datetime_pos) %>%
   arrange(sitekey, hoboID_env, datetime_pos)
 if (!file.exists(keys_file)) {
@@ -139,7 +142,7 @@ for (b in BUFFER_SENS_M)                                    # buffer sensitivity
   preds <- c(preds, list(loeo_add(paste0("M4r_buffer", buffer_suffix(b)), "kd_ref",
                                   buffer_suffix(b))))
 if (RUN_SPECTRAL_SUPPLEMENT) {
-  kd_bands <- readRDS(out_path("kd_bands.rds"))
+  kd_bands <- readRDS(in_path("kd_bands.rds"))
   sp <- eval_d$surface_par * eval_d$T_surf *
     spectral_atten(eval_d$water_depth_m, eval_d$sitekey, kd_bands)
   if (all(is.finite(sp))) preds <- c(preds, list(add(eval_d, "S_spectralKd", sp)))
@@ -147,6 +150,26 @@ if (RUN_SPECTRAL_SUPPLEMENT) {
 }
 preds <- bind_rows(preds)
 saveRDS(preds, out_path("predictions.rds"))
+
+# [NEW] Claude, 22 Oct 2026 — dated validation sheet, like your validation_<tag>.csv:
+#   one row per logger-hour, every main model's prediction as a column, plus
+#   the inputs that produced it. Kept for every run in output/logs/.
+validation <- preds %>% filter(model %in% c("M0", "M1", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r", "M4r_siteKd")) %>%
+  select(model, sitekey, hoboID_env, datetime_pos, pred) %>%
+  tidyr::pivot_wider(names_from = model, values_from = pred, names_prefix = "pred_") %>%
+  left_join(eval_d %>% select(sitekey, hoboID_env, datetime_pos, light_mol, surface_par,
+                              T_surf, water_depth_m, sun_altitude, kd_const, kd_sat,
+                              kd_ref, shadow_refr, ambient),
+            by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
+  left_join(preds %>% filter(model == "M4r") %>%
+              select(sitekey, hoboID_env, datetime_pos, w_ambient_M4r = w_fold),
+            by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
+  mutate(run_label = RUN_LABEL, run_id = RUN_ID,
+         datetime_pos = format(datetime_pos, "%Y-%m-%d %H:%M:%S"))
+val_file <- file.path(BASE_OUT_DIR, "logs", sprintf("validation_%s_%s.csv", RUN_ID, RUN_LABEL))
+dir.create(dirname(val_file), showWarnings = FALSE, recursive = TRUE)
+write.csv(validation, val_file, row.names = FALSE)
+message("Validation sheet: ", val_file)
 
 MAIN <- c("M0", "M1", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r")
 STEPS <- list(c("M0", "M1"), c("M1", "M2s"), c("M1", "M2r"),
@@ -210,9 +233,18 @@ print(refn %>% group_by(mode, k) %>%
                   p05 = stats::quantile(rmse, 0.05), p95 = stats::quantile(rmse, 0.95),
                   .groups = "drop") %>% as.data.frame(), digits = 3)
 
-write_manifest("03_models", extra = c(
+pick <- function(tab, m, col) { v <- tab[[col]][tab$model == m]; if (length(v)) signif(v, 4) else NA }
+headline <- c(M4r_rmse = pick(m_pooled, "M4r", "rmse"), M4r_bias = pick(m_pooled, "M4r", "bias"),
+              M4r_r2 = pick(m_pooled, "M4r", "r2"), M4r_within_r2 = pick(m_within, "M4r", "within_r2"),
+              M3r_rmse = pick(m_pooled, "M3r", "rmse"), M3r_within_r2 = pick(m_within, "M3r", "within_r2"),
+              M4r_dti_rmse = pick(m_daytime, "M4r", "rmse"),
+              w_folds = paste(sort(unique(w_folds$w_fold[w_folds$model == "M4r"])), collapse = "/"))
+write_manifest("03_models", extra = structure(c(
   sprintf("reference pool: %d loggers, %d used for Kd", nrow(pool), nrow(refs)),
   sprintf("evaluation rows: %d (frozen in eval_keys.csv)", N_EVAL),
   sprintf("ambient weight chosen per fold: %s",
-          paste(sort(unique(w_folds$w_fold[w_folds$model == "M4r"])), collapse = ", "))))
+          paste(sort(unique(w_folds$w_fold[w_folds$model == "M4r"])), collapse = ", ")),
+  sprintf("run label: %s   ambient weight: %s", RUN_LABEL,
+          if (is.finite(W_AMBIENT_FIXED)) paste("fixed", W_AMBIENT_FIXED) else "CV"),
+  sprintf("validation sheet: %s", val_file)), headline = headline))
 message("03 done.")

@@ -39,7 +39,7 @@ taylor_stats <- function(obs, pred) {
 }
 
 # ── Current models ───────────────────────────────────────────────────────────
-preds <- readRDS(need_file(out_path("predictions.rds")))
+preds <- readRDS(need_file(in_path("predictions.rds")))
 cur <- preds %>% group_by(model) %>%
   group_modify(~ taylor_stats(.x$light_mol, .x$pred)) %>% ungroup() %>%
   mutate(set = "current", label = model)
