@@ -13,8 +13,10 @@
 #    Fig 7  residuals vs hour, depth and shadow fraction
 #    S1     per-logger time series per event   -> figures/timeseries/
 #    S6     daytime-integrated PAR, measured vs predicted
-#    Fig 8  hourly PAR: constant Kd 0.2 vs reference-logger Kd (both shaded)
+#    Fig 8  hourly PAR: baseline M1 vs primary M4r
 #    Fig 9  daytime-integrated PAR: the same comparison
+#    Fig 10 event curves for the best, median and worst event (M1 vs M4r)
+#    S8     the same for every event               -> figures/event_curves/
 #    S7     residuals by event vs hour, depth and direct-light fraction
 #                                               -> figures/residuals_by_event/
 #  Single-logger shadow checks: scripts/08_logger_check.R (run on demand)
@@ -107,21 +109,34 @@ ev_col <- setNames(hcl.colors(length(events), "Dark 3"), events)
 
 # ── Fig 4: ladder ────────────────────────────────────────────────────────────
 # [NEW] — same idea as your thesis Fig 7, with confidence intervals
+#   [Claude, 22 Oct 2026] third panel: within-site R² (logger-to-logger skill);
+#   primary model in red; satellite branch labelled with its 12 events
 local({
-  ladder <- c("M0", "M1", "M2s", "M3s", "M4s", "M2r", "M3r", "M4r")
+  ladder <- c("M0", "M1", "M1d", "M2s", "M3s", "M4s", "M2r", "M3r", "M4r")
+  labs <- c(M0 = "M0  surface PAR", M1 = "M1  + constant Kd", M1d = "M1d  + direct shading (baseline)",
+            M2s = "M2s  satellite Kd", M3s = "M3s  + direct shading", M4s = "M4s  + ambient shading",
+            M2r = "M2r  reference Kd", M3r = "M3r  + direct shading", M4r = "M4r  + ambient shading")
   b <- boot[boot$model %in% ladder, ]
-  fig("fig4_model_ladder", w = 9, h = 5)
-  par(mfrow = c(1, 2), mar = c(4.5, 6, 2, 1))
-  for (met in c("rmse", "bias")) {
+  fig("fig4_model_ladder", w = 12, h = 5)
+  par(mfrow = c(1, 3), mar = c(4.5, 1, 3, 1), oma = c(0, 11, 0, 0))
+  panels <- c(rmse = "Hourly RMSE", bias = "Mean bias (pred - meas)",
+              within_r2 = "Within-site R\u00B2")
+  for (met in names(panels)) {
     d <- b[b$metric == met, ]; d <- d[match(rev(ladder), d$model), ]
     y <- seq_len(nrow(d))
-    plot(d$mid, y, xlim = range(c(d$lo, d$hi, 0)), yaxt = "n", pch = 19,
-         xlab = if (met == "rmse") "Hourly RMSE" else "Mean bias (pred - meas)", ylab = "",
-         main = toupper(met))
-    segments(d$lo, y, d$hi, y, lwd = 2)
-    axis(2, at = y, labels = d$model, las = 1)
-    if (met == "bias") abline(v = 0, lty = 2)
+    col <- ifelse(d$model == FIG_MAIN_MODEL, "#C8372D", ifelse(grepl("s$", d$model), "grey55", "black"))
+    plot(d$mid, y, xlim = range(c(d$lo, d$hi, 0), na.rm = TRUE), ylim = c(0.5, length(y) + 0.5),
+         yaxt = "n", pch = 19, col = col, cex = 1.3, xlab = panels[[met]], ylab = "",
+         main = panels[[met]])
+    segments(d$lo, y, d$hi, y, lwd = 2.5, col = col)
+    if (met == names(panels)[1]) axis(2, at = y, labels = labs[d$model], las = 1, tick = FALSE,
+                                      cex.axis = 1.05, outer = FALSE, line = 0, hadj = 1)
+    if (met != "rmse") abline(v = 0, lty = 2, col = "grey40")
     abline(h = 3.5, col = "grey80")   # separates satellite (s) and reference (r) branches
+    if (met == "rmse") {
+      text(par("usr")[2], 5, "satellite Kd\n(12 events)", adj = c(1.05, 0.5), cex = 0.85, col = "grey45")
+      text(par("usr")[2], 2, "reference Kd\n(17 events)", adj = c(1.05, 0.5), cex = 0.85)
+    }
   }
   dev.off()
 })
@@ -225,22 +240,16 @@ local({
 })
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Constant Kd (0.2) vs reference-logger Kd, all events pooled
+#  Baseline (M1) vs primary model (M4r), all events pooled
 #  [NEW] Claude, 22 Oct 2026
-#
-#  The two models differ ONLY in Kd:
-#    "Kd 0.2 + shading" = M1 (constant Kd, KD_CONSTANT) × the same shading term
-#                         as M4r, using M4r's own cross-validated ambient weight
-#                         for each event (w_fold). No new fitting.
-#    M4r                = reference-logger hourly Kd + the same shading.
-#  The constant-Kd-with-shading curve is a figure-only comparison, not a model
-#  in the pre-registered ladder; label it that way if it goes in the paper.
+#    Baseline = M1d: constant Kd (KD_CONSTANT) + direct shading. [29 Oct 2026; was M1]
+#    Primary  = M4r: reference-logger hourly Kd + direct and ambient shading.
 #    fig8   hourly PAR, measured vs predicted, coloured by hour
 #    fig9   daytime-integrated PAR, shape = event, colour = depth
 #    S7     residuals by event: vs hour, depth, direct-light fraction
 # ══════════════════════════════════════════════════════════════════════════════
 cmp <- local({
-  m1  <- preds %>% filter(model == "M1") %>%
+  m1  <- preds %>% filter(model == "M1d") %>%
     select(sitekey, hoboID_env, datetime_pos, pred_m1 = pred)
   m4  <- preds %>% filter(model == FIG_MAIN_MODEL) %>%
     select(sitekey, hoboID_env, datetime_pos, light_mol, water_depth_m,
@@ -249,13 +258,13 @@ cmp <- local({
     inner_join(m1, by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
     left_join(cache %>% select(sitekey, hoboID_env, datetime_pos, shadow_refr, ambient),
               by = c("sitekey", "hoboID_env", "datetime_pos")) %>%
-    mutate(pred_const = pred_m1 * ((1 - w_fold) * shadow_refr + w_fold * ambient),
+    mutate(pred_base = pred_m1,                                  # baseline = M1d
            hour       = as.integer(format(datetime_pos, "%H")))
-  stopifnot(nrow(out) == nrow(m4), all(is.finite(out$pred_const)))
+  stopifnot(nrow(out) == nrow(m4), all(is.finite(out$pred_base)))
   out
 })
-CMP_MODELS <- c(pred_const = sprintf("Constant Kd = %.1f + shading", KD_CONSTANT),
-                pred_ref   = sprintf("Reference-logger Kd + shading (%s)", FIG_MAIN_MODEL))
+CMP_MODELS <- c(pred_base = sprintf("Baseline (M1d): constant Kd = %.1f + direct shading", KD_CONSTANT),
+                pred_ref  = sprintf("Primary (%s): reference Kd + shading", FIG_MAIN_MODEL))
 stat_box <- function(obs, pred, extra = NULL) {
   m <- metrics(obs, pred)
   legend("topleft", bty = "n", cex = 0.9, legend = c(
@@ -276,8 +285,8 @@ local({
   hcol  <- setNames(colorRampPalette(c("#3B0F0A", "#C8553D", "#F4C9B8",
                                        "#C8553D", "#3B0F0A"))(length(hrs)), hrs)
   show  <- intersect(c(8, 12, 16), hrs)
-  lim   <- c(0, max(c(cmp$light_mol, cmp$pred_const, cmp$pred_ref)))
-  fig("fig8_hourly_constKd_vs_refKd", w = 12, h = 6)
+  lim   <- c(0, max(c(cmp$light_mol, cmp$pred_base, cmp$pred_ref)))
+  fig("fig8_hourly_M1_vs_M4r", w = 12, h = 6)
   layout(matrix(c(1, 2, 3), 1), widths = c(1, 1, 0.18))
   par(mar = c(4.5, 4.8, 3, 1))
   for (p in names(CMP_MODELS)) {
@@ -314,7 +323,7 @@ local({
   dcol   <- function(z) colorRampPalette(c("#FBD1B0", "#E8743B", "#2B0F06"))(100)[
                           1 + round(99 * (z - dr[1]) / diff(dr))]
   lim <- c(0, max(unlist(lapply(di, function(d) c(d$obs, d$pred)))))
-  fig("fig9_DLI_constKd_vs_refKd", w = 12, h = 6)
+  fig("fig9_DLI_M1_vs_M4r", w = 12, h = 6)
   layout(matrix(c(1, 2, 3), 1), widths = c(1, 1, 0.42))
   par(mar = c(4.5, 4.8, 3, 1))
   for (p in names(CMP_MODELS)) {
@@ -337,8 +346,8 @@ local({
 })
 
 # ── S7: residual breakdown by event (pred - meas) ────────────────────────────
-#  Points and boxes = reference-logger model; red line = its loess with 95%
-#  band; grey dashed = constant-Kd model's loess. Open circles = binned means
+#  Points and boxes = primary model (M4r); red line = its loess with 95%
+#  band; grey dashed = baseline (M1) loess. Open circles = binned means
 #  ± SD (8 equal-count bins). Four events per page.
 local({
   smooth_band <- function(x, y) {
@@ -361,20 +370,20 @@ local({
     data.frame(x = tapply(x, b, mean), m = tapply(y, b, mean), s = tapply(y, b, stats::sd))
   }
   cmp$res_ref   <- cmp$pred_ref - cmp$light_mol
-  cmp$res_const <- cmp$pred_const - cmp$light_mol
-  ylim <- stats::quantile(c(cmp$res_ref, cmp$res_const), c(0.005, 0.995))
+  cmp$res_base <- cmp$pred_base - cmp$light_mol
+  ylim <- stats::quantile(c(cmp$res_ref, cmp$res_base), c(0.005, 0.995))
   pages <- split(events, ceiling(seq_along(events) / 4))
   for (pg in seq_along(pages)) {
     fig(sprintf("residuals_by_event/S7_residuals_by_event_p%d", pg), w = 13, h = 3.4 * length(pages[[pg]]) + 0.8)
     par(mfrow = c(length(pages[[pg]]), 3), mar = c(4.2, 4.5, 3.2, 1), oma = c(0, 0, 3, 0))
     for (k in pages[[pg]]) {
       d  <- cmp[cmp$sitekey == k, ]
-      bx <- sprintf("bias: ref %+.0f | const %+.0f  (n=%d)",
-                    mean(d$res_ref), mean(d$res_const), nrow(d))
+      bx <- sprintf("bias: M4r %+.0f | M1 %+.0f  (n=%d)",
+                    mean(d$res_ref), mean(d$res_base), nrow(d))
       boxplot(res_ref ~ hour, data = d, outline = FALSE, col = "#EAD9D5", border = "#7A5C55",
               ylim = ylim, xlab = "Hour of day", ylab = "Residual (pred - meas)")
       title(paste0(k, ": residual vs hour"), line = 1.4)
-      med_c <- tapply(d$res_const, d$hour, stats::median)
+      med_c <- tapply(d$res_base, d$hour, stats::median)
       points(seq_along(med_c), med_c, pch = 4, col = "grey35", lwd = 2)
       abline(h = 0, lty = 2, col = "red"); mtext(bx, side = 3, line = 0.2, cex = 0.6)
       for (v in c("water_depth_m", "shadow_refr")) {
@@ -392,7 +401,7 @@ local({
                   border = NA)
           lines(s$x, s$fit, col = "#C8372D", lwd = 2.5)
         }
-        sc <- smooth_band(d[[v]], d$res_const)
+        sc <- smooth_band(d[[v]], d$res_base)
         if (!is.null(sc)) lines(sc$x, sc$fit, col = "grey35", lwd = 2, lty = 2)
         b <- bin_means(d[[v]], d$res_ref)
         if (!is.null(b)) {
@@ -402,12 +411,91 @@ local({
         mtext(bx, side = 3, line = 0.2, cex = 0.6)
       }
     }
-    mtext(sprintf(paste("Residuals by event (%d of %d). Red = reference-logger Kd (%s),",
-                        "grey dashed / x = constant Kd %.1f"),
+    mtext(sprintf(paste("Residuals by event (%d of %d). Red = primary model (%s),",
+                        "grey dashed / x = baseline M1d (constant Kd %.1f + direct shading)"),
                   pg, length(pages), FIG_MAIN_MODEL, KD_CONSTANT),
           outer = TRUE, line = 1, font = 2)
     dev.off()
   }
+})
+
+# ── Fig 10 + S8: event curves, baseline (M1) vs primary model (M4r) ──────────
+# [NEW] Claude, 22 Oct 2026. Replaces the thesis Fig 8 grid in the paper.
+#   One row per event, M1 left, M4r right, shared y axis within a row.
+#   Grey = measured, orange = predicted: shaded band = range across loggers
+#   (min-max) each hour, faint lines = individual loggers, bold line = mean.
+#   x = local hour; a 24-h deployment means the morning hours come from the
+#   day after the afternoon hours. Separate days are drawn as separate curves.
+#   Fig 10: best, median and worst event by primary-model hourly R², chosen by
+#     that rule in the code (or set FIG_EXAMPLE_EVENTS in config.R).
+#   S8: all events, six per page, same layout.
+#   The per-logger S1 time series above are still drawn as before.
+local({
+  ev_r2 <- sapply(events, function(k) {
+    d <- cmp[cmp$sitekey == k, ]; metrics(d$light_mol, d$pred_ref)$r2 })
+  ord <- names(sort(ev_r2, decreasing = TRUE))
+  ex  <- if (exists("FIG_EXAMPLE_EVENTS") && length(FIG_EXAMPLE_EVENTS))
+           FIG_EXAMPLE_EVENTS else ord[c(1, ceiling(length(ord) / 2), length(ord))]
+  message("Fig 10 example events (best, median, worst by ", FIG_MAIN_MODEL, " R2): ",
+          paste(ex, collapse = ", "))
+  COL_MEAS <- "grey35"; COL_PRED <- "#E07B39"
+
+  band_panel <- function(d, p, ylim, title, show_legend = FALSE) {
+    d$pp  <- d[[p]]
+    d$day <- format(d$datetime_pos, "%Y-%m-%d", tz = LOCAL_TZ)
+    d$hr  <- as.numeric(format(d$datetime_pos, "%H", tz = LOCAL_TZ)) + 0.5
+    plot(NA, xlim = c(6.5, 17.5), ylim = ylim, xaxt = "n",
+         xlab = "Hour (local)", ylab = expression("PAR (" * mu * "mol m"^-2 * " s"^-1 * ")"))
+    axis(1, at = seq(7, 17, 2))
+    title(title, line = 0.6, cex.main = 0.95)
+    for (dy in unique(d$day)) {
+      s <- d[d$day == dy, ]
+      for (v in c("light_mol", "pp")) {
+        col <- if (v == "light_mol") COL_MEAS else COL_PRED
+        a <- s %>% group_by(hr) %>%
+          summarise(lo = min(.data[[v]]), hi = max(.data[[v]]), m = mean(.data[[v]]),
+                    .groups = "drop") %>% arrange(hr)
+        if (nrow(a) > 1)
+          polygon(c(a$hr, rev(a$hr)), c(a$lo, rev(a$hi)), col = adjustcolor(col, 0.18), border = NA)
+        for (id in unique(s$hoboID_env)) {
+          l <- s[s$hoboID_env == id, ]; l <- l[order(l$hr), ]
+          lines(l$hr, l[[v]], col = adjustcolor(col, 0.25), lwd = 0.6)
+        }
+        lines(a$hr, a$m, col = col, lwd = 3)
+      }
+    }
+    m <- metrics(d$light_mol, d$pp)
+    legend("topright", bty = "n", cex = 0.8,
+           legend = c(sprintf("RMSE %.0f", m$rmse), sprintf("bias %+.0f", m$bias),
+                      sprintf("R² %.2f", m$r2)))
+    if (show_legend)
+      legend("topleft", bty = "n", cex = 0.8, lwd = c(3, 3, 8, 8),
+             col = c(COL_MEAS, COL_PRED, adjustcolor(COL_MEAS, 0.3), adjustcolor(COL_PRED, 0.3)),
+             legend = c("measured, mean", "predicted, mean", "measured range", "predicted range"))
+  }
+
+  draw_rows <- function(keys, file, page_title) {
+    fig(file, w = 10, h = 2.9 * length(keys) + 0.7)
+    par(mfrow = c(length(keys), 2), mar = c(4, 4.5, 2.2, 1), oma = c(1.2, 2.5, 2.5, 0))
+    for (k in keys) {
+      d  <- cmp[cmp$sitekey == k, ]
+      yl <- c(0, max(c(d$light_mol, d$pred_base, d$pred_ref)))
+      band_panel(d, "pred_base", yl, "Baseline (M1d): constant Kd + direct shading",
+                 show_legend = (k == keys[1]))
+      mtext(k, side = 2, line = 5.2, font = 2, cex = 1.1)
+      band_panel(d, "pred_ref", yl, sprintf("Primary (%s): reference Kd + shading", FIG_MAIN_MODEL))
+    }
+    mtext(page_title, outer = TRUE, line = 0.8, font = 2)
+    dev.off()
+  }
+
+  draw_rows(ex, "fig10_event_examples",
+            sprintf("Best, median and worst events by %s hourly R²", FIG_MAIN_MODEL))
+  pages <- split(ord, ceiling(seq_along(ord) / 6))
+  for (pg in seq_along(pages))
+    draw_rows(pages[[pg]], sprintf("event_curves/S8_event_curves_p%d", pg),
+              sprintf("All events, ordered by %s hourly R² (page %d of %d)",
+                      FIG_MAIN_MODEL, pg, length(pages)))
 })
 
 write_manifest("04_figures")

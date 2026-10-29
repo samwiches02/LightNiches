@@ -140,6 +140,21 @@ interp_capture_tide <- function(sitekey, capture_dt, fit) {
 #  For these, paste a predicted tide (in METRES, chart datum, same datum as
 #  tide_cm) from an external Lizard Island tide source at that exact timestamp.
 build_capture_tide <- function(fit) {
+  # [NEW] Claude, 28 Oct 2026: new 2016-aligned DEMs -> one value per SITE
+  if (identical(DEPTH_REFERENCE, "survey_2016")) {
+    site <- substr(SITES, 1, nchar(SITES) - 2)
+    miss <- setdiff(unique(site), names(CAPTURE_TIDE_2016))
+    if (length(miss) > 0)
+      stop("No CAPTURE_TIDE_2016 value for site(s): ", paste(miss, collapse = ", "), call. = FALSE)
+    ct <- data.frame(sitekey = SITES,
+                     capture_dt = as.POSIXct(unname(CAPTURE_TIME_2016[site]),
+                                             format = "%Y-%m-%d %H:%M", tz = LOCAL_TZ),
+                     capture_tide_m = unname(CAPTURE_TIDE_2016[site]),
+                     source = "2016 survey tide, per site (config.R CAPTURE_TIDE_2016)",
+                     stringsAsFactors = FALSE)
+    message("  Depth reference: 2016 survey surface, one capture tide per site")
+    return(ct)
+  }
   ct <- PHOTOGRAMMETRY
   ct$capture_dt <- as.POSIXct(ct$capture_dt, format = "%Y-%m-%d %H:%M", tz = LOCAL_TZ)
   ct$capture_tide_m <- mapply(interp_capture_tide, ct$sitekey, ct$capture_dt,
@@ -233,6 +248,23 @@ read_env_long <- function() {
     env$dpHB[fill] <- dp[key[fill]]
     message("  dpHB filled from geom_new.csv for ", length(unique(key[fill])), " logger(s): ",
             paste(unique(key[fill]), collapse = ", "))
+  }
+
+  # [NEW] Claude, 28 Oct 2026: logger heights from the NEW DEMs (config DPHB_CSV).
+  #   Loggers not in the file (no position) keep the old value shifted by their
+  #   event's median new-old difference, so they stay on the same reference.
+  if (!is.null(DPHB_CSV) && !is.na(DPHB_CSV)) {
+    nd <- utils::read.csv(need_file(DPHB_CSV), stringsAsFactors = FALSE)
+    nv <- setNames(nd$dpHB, paste(nd$site, nd$year, nd$unit))
+    has <- key %in% names(nv)
+    old <- env$dpHB
+    env$dpHB[has] <- nv[key[has]]
+    ev  <- paste(env$site, env$year)
+    shift <- tapply(env$dpHB[has] - old[has], ev[has], median, na.rm = TRUE)
+    rest <- !has & is.finite(old) & ev %in% names(shift)
+    env$dpHB[rest] <- old[rest] + shift[ev[rest]]
+    message(sprintf("  dpHB from %s for %d logger(s); %d logger(s) not in it kept the old value + their event's median shift",
+                    basename(DPHB_CSV), length(unique(key[has])), length(unique(key[rest]))))
   }
   env
 }

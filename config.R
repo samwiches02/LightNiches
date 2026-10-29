@@ -23,28 +23,27 @@
 # [YOURS, EDITED]
 #   - [Claude] your `wanted` table, as keys
 # [Claude, 20 Oct 2026] every event with light data, a DEM and a capture time
-SITES <- c("CB18", "CB19",
+# [28 Oct 2026] 22 events. With the new 2016-aligned DEMs the depth correction
+#   is one value per SITE (2016 survey tide, see DEPTH REFERENCE below), so the
+#   five events that were only excluded for lacking their own capture time are
+#   back in: CB17, RS17, TB17, TM17, SE19.
+SITES <- c("CB17", "CB18", "CB19",
            "GT17", "GT19",
            "HS17", "HS19",
            "L117", "L119",
            "N317", "N318", "N319",
-           "RS18",
-           "SE17", "SE18",
-           "TB18", "TB19",
-           "TM19")
+           "RS17", "RS18",
+           "SE17", "SE18", "SE19",
+           "TB17", "TB18", "TB19",
+           "TM17", "TM19")
 
 # [NEW] Every event with data that is NOT in SITES needs a written reason here.
 #   03_models.R prints this table.
 EXCLUDED_EVENTS <- c(
-  GT18 = "no DEM",
-  HS18 = "no DEM",
-  L118 = "no DEM",
-  CB17 = "no photogrammetry capture time (needed for the capture-tide depth correction)",
-  RS17 = "no photogrammetry capture time (needed for the capture-tide depth correction)",
-  TB17 = "no photogrammetry capture time (needed for the capture-tide depth correction)",
-  TM17 = "no photogrammetry capture time (needed for the capture-tide depth correction)",
-  SE19 = "no photogrammetry capture time (needed for the capture-tide depth correction)",
-  RS19 = "no photogrammetry capture time; also only 6 light records per logger",
+  GT18 = "no logger positions in geom_new.csv (a new DEM exists)",
+  HS18 = "no logger positions in geom_new.csv (a new DEM exists)",
+  L118 = "no logger positions in geom_new.csv (a new DEM exists)",
+  RS19 = "only 6 light records per logger",
   TM18 = paste("no reference logger: every logger passing the geometry rules is",
                "shallower than REF_DEPTH_MIN_M (1 m) at low tide (0.6-0.8 m);",
                "decided before any metric was computed")
@@ -54,16 +53,16 @@ EXCLUDED_EVENTS <- c(
 # [NEW] relative to the project root (here::here() finds it via the .here file).
 #   Replaces setwd("~/Desktop/...") and the /Users/samueleszenyi/... paths.
 DATA_DIR  <- here::here("data")
-OUT_DIR   <- here::here("output")
+OUT_DIR   <- here::here("output_newdem")   # [27 Oct 2026] new DEMs; was here::here("output")
 
 ENV_LONG_CSV     <- file.path(DATA_DIR, "env_long_depth_kd_longlat.csv")
-GEOM_CSV         <- file.path(DATA_DIR, "geom_new.csv")
+GEOM_CSV         <- file.path(DATA_DIR, "geom_new_realigned.csv")   # [27 Oct 2026] positions realigned to the new DEMs; was "geom_new.csv"
 KDPAR_LOOKUP_CSV <- file.path(DATA_DIR, "kdpar_lookup.csv")
 KD_BANDS_CSV     <- file.path(DATA_DIR, "kd_raw_per_wavelength.csv")
 # Directory holding tides_Lizard{2017,2018,2019}.csv
 TIDE_CSV_DIR     <- file.path(DATA_DIR, "tides")
 #create filepath for DEMS   [Claude: files named <SITE><yy>.tif, e.g. CB19.tif]
-DEM_DIR          <- file.path(DATA_DIR, "dems")
+DEM_DIR          <- file.path(DATA_DIR, "dems_new")   # [27 Oct 2026] new DEMs (EPSG:32755, ~5 mm); was "dems"
 
 LOCAL_TZ <- "Australia/Brisbane"
 
@@ -120,9 +119,12 @@ UTM_CRS               <- "EPSG:32755"
 #   positions in geom_new.csv (TMERC_CRS). Their CRS is user-defined in the
 #   file, so it is set explicitly here; the value is identical to the file's.
 #   2018/2019 files are WGS84 lon/lat (EPSG:4326) and need nothing.
-DEM_CRS_OVERRIDE <- list("2017" = paste0("+proj=tmerc +lat_0=-14.6989736557007",
-                                         " +lon_0=145.448257446289 +k=1 +x_0=0 +y_0=0",
-                                         " +datum=WGS84 +units=m +no_defs"))
+# [27 Oct 2026] The new DEMs (data/dems_new/) all carry EPSG:32755 in the file,
+#   so no override. For the OLD DEMs (data/dems/) put this back:
+#   DEM_CRS_OVERRIDE <- list("2017" = paste0("+proj=tmerc +lat_0=-14.6989736557007",
+#                                            " +lon_0=145.448257446289 +k=1 +x_0=0 +y_0=0",
+#                                            " +datum=WGS84 +units=m +no_defs"))
+DEM_CRS_OVERRIDE <- list()
 # Sanity checks after reprojection (standardize_dem_crs)
 LIZARD_BBOX      <- c(lon_min = 145.35, lon_max = 145.55, lat_min = -14.80, lat_max = -14.55)
 DEM_MAX_RELIEF_M <- 20
@@ -139,7 +141,9 @@ CROP_MARGIN_M         <- 0.5   # cosmetic buffer around the 6.5 m disc
 # should fill), and derive the downsample factor per-DEM from the NATIVE pixel
 # size so the disc ends up at that resolution on every site.
 # Bigger value = finer disc = slower raytrace (cost scales ~N^2).
-REEF_RADIUS_PX_TARGET <- 800   # target pixel radius of the reef disc
+# [27 Oct 2026] 1300 px = 6.5 m / 0.005 m -> native 5 mm on the new DEMs
+#   (downsample x1). Was 800, which on 5 mm DEMs rounds to x2 = 10 mm.
+REEF_RADIUS_PX_TARGET <- 1300  # target pixel radius of the reef disc
 MIN_DOWNSAMPLE        <- 1     # never upsample; 1 = keep native if already finer
 
 #  MAXSEARCH_M       : direct-beam rays travel the same physical distance
@@ -167,6 +171,40 @@ FORCE_RAYTRACE <- FALSE
 #   [Claude] document every row you add in the Methods.
 LOGGER_OFFSETS <- data.frame(site = character(), year = integer(),
                              hoboID = character(), dx_m = numeric(), dy_m = numeric())
+
+
+# ── DEPTH REFERENCE for the new DEMs ─────────────────────────────────────────
+# [NEW] Claude, 28 Oct 2026.
+#  The new DEMs (data/dems_new) were all aligned to the 2016 surveys, so every
+#  year at a site shares ONE height reference: the sea surface during that
+#  site's 2016 survey (confirmed: logger heights agree across years to ~4 cm
+#  while the old per-year capture tides differed by up to 1.1 m; light data
+#  favour this reference over a tide datum).
+#     water_depth_m = tide - dpHB - CAPTURE_TIDE_2016[site]
+#  "survey_2016" = use CAPTURE_TIDE_2016 below for every year at a site.
+#  "per_event"   = the old method (PHOTOGRAMMETRY times + harmonic fit, per event),
+#                  only valid for the OLD DEMs in data/dems.
+DEPTH_REFERENCE <- "survey_2016"
+
+#  2016 survey times: middle-of-survey photo (PR_ file names are UTC; +10 h = AEST).
+#  Tides: 59-constituent fit to the official MSQ Lizard Island prediction
+#  (station 042002A, 10-min, 2022, LAT), predicted at these times, then minus
+#  0.12 m: the MSQ series sits 0.11-0.13 m above data/tides/*.csv in all three
+#  years (checked on 1750 readings, sd 5-7 cm), and depth needs one zero.
+#  Uncertainty about +/-0.1 m (weather; one photo per survey). RS and SE were on
+#  a fast-rising tide (+0.15-0.19 m / 30 min).
+CAPTURE_TIME_2016 <- c(CB = "2016-11-20 09:28", GT = "2016-11-20 16:25",
+                       HS = "2016-11-21 16:35", L1 = "2016-11-23 16:31",
+                       N3 = "2016-11-17 10:30", RS = "2016-11-17 08:45",
+                       SE = "2016-11-20 11:06", TM = "2016-11-23 15:39",
+                       TB = "2016-11-24 16:30")
+CAPTURE_TIDE_2016 <- c(CB = 1.05, GT = 2.09, HS = 2.21, L1 = 2.03, N3 = 2.38,
+                       RS = 1.86, SE = 1.47, TM = 1.81, TB = 1.80)   # metres
+
+#  Logger bed heights (dpHB) sampled from the NEW DEMs at the realigned positions
+#  (median in a 6 cm circle; check_depth_reference.R). Replaces env_long's dpHB,
+#  which came from the old DEMs. Set to NA to keep env_long's dpHB.
+DPHB_CSV <- file.path(DATA_DIR, "dphb_newdem.csv")
 
 
 # ── Tides and the DEM capture-tide correction ────────────────────────────────
@@ -219,7 +257,10 @@ REF_POOL_MAX    <- 8      # candidates kept per site (used for the logger-number
 N_REF           <- 5      # loggers used for the main reference-Kd model (your N_REF_LOGGERS)
 REF_MIN_HOURS   <- 5      # your min_hours gate
 REF_MIN_MIDDAY  <- 2      # your >= 2 midday hours gate (hours 10:00-14:00)
-REF_AMBIENT_MIN <- 0.90   # mean ambient (sky-view) fraction in the buffer
+# [29 Oct 2026] lowered from 0.90 so every event has a reference logger with the
+#   new DEMs/depths (GT19 best 0.88; L119/TB18 open loggers are < 1 m deep).
+#   Set after ray-tracing, BEFORE any model was scored. Report in the Methods.
+REF_AMBIENT_MIN <- 0.85   # mean ambient (sky-view) fraction in the buffer
 REF_SHADOW_MIN  <- 0.80   # refracted direct-light fraction in the logger's WORST hour
 REF_DEPTH_MIN_M <- 1.0    # shallowest water depth during deployment
 
@@ -284,3 +325,5 @@ if (is.finite(W_AMBIENT_FIXED)) {
 BASE_OUT_DIR <- OUT_DIR                                     # stage 01/02 products live here
 if (RUN_LABEL != "main") OUT_DIR <- file.path(BASE_OUT_DIR, "runs", RUN_LABEL)
 RUN_ID <- Sys.getenv("LN_RUN_ID", format(Sys.time(), "%Y%m%d_%H%M%S"))  # shared by one run_all.R call
+
+FIG_EXAMPLE_EVENTS <- c("HS19", "TM19", "GT17")

@@ -127,6 +127,9 @@ r_s <- r_s[match(paste(eval_s$sitekey, eval_s$hoboID_env, eval_s$datetime_pos),
 preds <- list(
   add(eval_d, "M0",  predict_par(eval_d, NULL,       "none")),
   add(eval_d, "M1",  predict_par(eval_d, "kd_const", "none")),
+  # [NEW] 29 Oct 2026: BASELINE model = constant Kd + direct shading only (like the
+  #   thesis baseline). M1d -> M3r isolates the Kd source; M1 -> M1d the shading.
+  add(eval_d, "M1d", predict_par(eval_d, "kd_const", "direct")),
   add(eval_s, "M2s", predict_par(eval_s, "kd_sat",   "none")),
   add(eval_d, "M2r", predict_par(eval_d, "kd_ref",   "none")),
   add(eval_s, "M3s", predict_par(eval_s, "kd_sat",   "direct")),
@@ -154,7 +157,7 @@ saveRDS(preds, out_path("predictions.rds"))
 # [NEW] Claude, 22 Oct 2026 — dated validation sheet, like your validation_<tag>.csv:
 #   one row per logger-hour, every main model's prediction as a column, plus
 #   the inputs that produced it. Kept for every run in output/logs/.
-validation <- preds %>% filter(model %in% c("M0", "M1", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r", "M4r_siteKd")) %>%
+validation <- preds %>% filter(model %in% c("M0", "M1", "M1d", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r", "M4r_siteKd")) %>%
   select(model, sitekey, hoboID_env, datetime_pos, pred) %>%
   tidyr::pivot_wider(names_from = model, values_from = pred, names_prefix = "pred_") %>%
   left_join(eval_d %>% select(sitekey, hoboID_env, datetime_pos, light_mol, surface_par,
@@ -171,10 +174,11 @@ dir.create(dirname(val_file), showWarnings = FALSE, recursive = TRUE)
 write.csv(validation, val_file, row.names = FALSE)
 message("Validation sheet: ", val_file)
 
-MAIN <- c("M0", "M1", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r")
+MAIN <- c("M0", "M1", "M1d", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r")
 STEPS <- list(c("M0", "M1"), c("M1", "M2s"), c("M1", "M2r"),
               c("M2s", "M3s"), c("M2r", "M3r"), c("M3s", "M4s"), c("M3r", "M4r"),
-              c("M4r_siteKd", "M4r"))
+              c("M4r_siteKd", "M4r"),
+              c("M1", "M1d"), c("M1d", "M3r"), c("M1d", "M4r"))   # [NEW] baseline steps
 if (RUN_UNREFRACTED_DIAGNOSTIC) STEPS <- c(STEPS, list(c("M3r_unrefracted", "M3r")))
 
 # ── 5. Metrics ───────────────────────────────────────────────────────────────
@@ -234,7 +238,8 @@ print(refn %>% group_by(mode, k) %>%
                   .groups = "drop") %>% as.data.frame(), digits = 3)
 
 pick <- function(tab, m, col) { v <- tab[[col]][tab$model == m]; if (length(v)) signif(v, 4) else NA }
-headline <- c(M4r_rmse = pick(m_pooled, "M4r", "rmse"), M4r_bias = pick(m_pooled, "M4r", "bias"),
+headline <- c(M1d_rmse = pick(m_pooled, "M1d", "rmse"), M1d_r2 = pick(m_pooled, "M1d", "r2"),
+              M4r_rmse = pick(m_pooled, "M4r", "rmse"), M4r_bias = pick(m_pooled, "M4r", "bias"),
               M4r_r2 = pick(m_pooled, "M4r", "r2"), M4r_within_r2 = pick(m_within, "M4r", "within_r2"),
               M3r_rmse = pick(m_pooled, "M3r", "rmse"), M3r_within_r2 = pick(m_within, "M3r", "within_r2"),
               M4r_dti_rmse = pick(m_daytime, "M4r", "rmse"),

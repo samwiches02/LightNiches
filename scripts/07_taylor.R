@@ -69,7 +69,7 @@ stats_out <- bind_rows(cur, split, thesis)
 write.csv(stats_out, out_path("taylor_stats.csv"), row.names = FALSE)
 
 # ── Drawing ──────────────────────────────────────────────────────────────────
-LADDER <- c("M0", "M1", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r")
+LADDER <- c("M0", "M1", "M1d", "M2s", "M2r", "M3s", "M3r", "M4s", "M4r")
 col_of <- function(m) {
   base <- sub("_.*", "", m)
   pal  <- c(M0 = "#7f7f7f", M1 = "#9467bd", M2s = "#8c564b", M2r = "#1f77b4",

@@ -8,3 +8,5 @@ _to_delete/
 _backup_*/
 *.bak_pre_*
 .DS_Store
+output_newdem/
+*.log
